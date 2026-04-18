@@ -4,14 +4,14 @@ use crate::operations;
 use crate::scanner;
 use crate::state::{AppPaths, PersistedState};
 use gio::prelude::*;
-use glib::ControlFlow;
 use glib::translate::IntoGlib;
+use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, ComboBoxText, Dialog, Entry,
-    FileChooserAction, FileChooserNative, FlowBox, FlowBoxChild, Grid, Image, Label, ListBox,
-    ListBoxRow, Orientation, Paned, PolicyType, ResponseType, Revealer, ScrolledWindow,
-    SearchEntry, SelectionMode, Stack, StackSwitcher, TextTag, TextView, gdk, pango,
+    gdk, pango, Align, Application, ApplicationWindow, Box as GtkBox, Button, ComboBoxText, Dialog,
+    Entry, FileChooserAction, FileChooserNative, FlowBox, FlowBoxChild, Grid, Image, Label,
+    ListBox, ListBoxRow, Orientation, Paned, PolicyType, ResponseType, Revealer, ScrolledWindow,
+    SearchEntry, SelectionMode, Stack, StackSwitcher, TextTag, TextView,
 };
 use similar::{ChangeTag, TextDiff};
 use std::cell::RefCell;
@@ -465,10 +465,12 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     repo_editor_line_numbers.set_cursor_visible(false);
     repo_editor_line_numbers.set_monospace(true);
     repo_editor_line_numbers.set_vexpand(true);
+    repo_editor_line_numbers.set_width_request(48);
     repo_editor_line_numbers.add_css_class("line-numbers");
     let line_numbers_scroll = ScrolledWindow::builder()
         .hscrollbar_policy(PolicyType::Never)
         .vexpand(true)
+        .min_content_width(48)
         .child(&repo_editor_line_numbers)
         .build();
     let repo_editor_scroll = ScrolledWindow::builder()
@@ -3023,7 +3025,11 @@ fn active_remote_name(runtime: &Rc<RefCell<AppRuntime>>) -> String {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn prompt_new_profile(runtime: Rc<RefCell<AppRuntime>>) {
