@@ -2,6 +2,8 @@
 
 A simple GTK4 GUI for managing dotfiles with Git.
 
+![App Screenshot](assets/app.png)
+
 ## Features
 
 - Visual management of dotfiles in `~` and `~/.config`
