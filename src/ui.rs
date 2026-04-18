@@ -469,6 +469,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     repo_editor_line_numbers.add_css_class("line-numbers");
     let line_numbers_scroll = ScrolledWindow::builder()
         .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Never)
         .vexpand(true)
         .min_content_width(48)
         .child(&repo_editor_line_numbers)
