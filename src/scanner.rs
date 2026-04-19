@@ -133,6 +133,15 @@ pub fn classify_entry(
     } else {
         None
     };
+    let managed_source = record
+        .map(|record| record.managed_source.clone())
+        .or_else(|| {
+            if managed_state == ManagedState::ManagedActive {
+                symlink_target.clone()
+            } else {
+                None
+            }
+        });
 
     Ok(DotfileEntry {
         id,
@@ -145,7 +154,7 @@ pub fn classify_entry(
         origin,
         kind,
         managed_state,
-        managed_source: record.map(|record| record.managed_source.clone()),
+        managed_source,
         symlink_target,
         backup_path: record.and_then(|record| record.backup_path.clone()),
         warning,
@@ -217,6 +226,34 @@ mod tests {
 
         let entry = classify_entry(&state, &home.join(".zshrc"), OriginScope::Home).unwrap();
         assert_eq!(entry.managed_state, ManagedState::ManagedActive);
+    }
+
+    #[test]
+    fn infers_managed_source_from_active_symlink_without_record() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(repo_root.join("profiles/desktop-arch/config")).unwrap();
+        let managed_source = repo_root.join("profiles/desktop-arch/config/nvim");
+        std::fs::write(&managed_source, "set number").unwrap();
+        std::os::unix::fs::symlink(&managed_source, xdg.join("nvim")).unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root.clone()),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let entry = classify_entry(&state, &xdg.join("nvim"), OriginScope::XdgConfig).unwrap();
+        assert_eq!(entry.managed_state, ManagedState::ManagedActive);
+        assert_eq!(entry.managed_source, Some(managed_source));
     }
 
     #[test]

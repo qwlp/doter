@@ -32,6 +32,28 @@ pub fn init_repo(path: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("Repository has no workdir"))
 }
 
+pub fn clone_repo(url: &str, path: &Path) -> Result<PathBuf> {
+    if url.trim().is_empty() {
+        return Err(anyhow!("Repository URL is required"));
+    }
+    if path.exists() {
+        let mut entries = fs::read_dir(path)?;
+        if entries.next().is_some() {
+            return Err(anyhow!(
+                "Destination {} is not empty",
+                path.display()
+            ));
+        }
+    } else {
+        fs::create_dir_all(path)?;
+    }
+
+    let repo = Repository::clone(url, path)?;
+    repo.workdir()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("Repository has no workdir"))
+}
+
 pub fn repo_status(repo_root: &Path) -> Result<GitRepoState> {
     let repo = Repository::open(repo_root)?;
     let remotes = repo.remotes()?;

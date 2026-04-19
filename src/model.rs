@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub include_xdg_config: bool,
     pub backup_enabled: bool,
     pub remote_name: String,
+    #[serde(default)]
+    pub onboarding_complete: bool,
     #[serde(default = "default_profiles")]
     pub profiles: Vec<String>,
     #[serde(default = "default_active_profile")]
@@ -77,6 +79,7 @@ impl Default for AppConfig {
             include_xdg_config: true,
             backup_enabled: true,
             remote_name: "origin".to_string(),
+            onboarding_complete: false,
             profiles: default_profiles(),
             active_profile: default_active_profile(),
         }

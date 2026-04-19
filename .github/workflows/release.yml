@@ -1,6 +1,7 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -9,10 +10,14 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  release:
     runs-on: ubuntu-latest
+    env:
+      AUR_REPO: ssh://aur@aur.archlinux.org/doter-bin.git
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
@@ -20,10 +25,95 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release archive
-        run: ./scripts/package-release.sh
+      - name: Prepare release metadata
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            current_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+            version="$(./scripts/next-version.sh "$current_version")"
+            ./scripts/set-version.sh "$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          ./scripts/package-release.sh
+
+          archive_path="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
+          if [[ -z "$archive_path" ]]; then
+            echo "release archive was not produced" >&2
+            exit 1
+          fi
+          sha256="$(sha256sum "$archive_path" | awk '{print $1}')"
+          ./scripts/update-aur-metadata.sh --version "$version" --sha256 "$sha256"
+
+          tag="v$version"
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "archive_path=$archive_path"
+            echo "sha256=$sha256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push release version
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.prepare.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml packaging/aur/doter-bin/PKGBUILD packaging/aur/doter-bin/.SRCINFO
+          git commit -m "release: $tag"
+          git tag "$tag"
+          git push origin HEAD
+          git push origin "$tag"
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          tag_name: ${{ steps.prepare.outputs.tag }}
+          files: ${{ steps.prepare.outputs.archive_path }}
+
+      - name: Set up AUR SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Add AUR host key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Publish AUR package
+        shell: bash
+        env:
+          AUR_GIT_AUTHOR_NAME: ${{ vars.AUR_GIT_AUTHOR_NAME }}
+          AUR_GIT_AUTHOR_EMAIL: ${{ vars.AUR_GIT_AUTHOR_EMAIL }}
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          git clone "$AUR_REPO" "$workdir/doter-bin"
+          cp packaging/aur/doter-bin/PKGBUILD "$workdir/doter-bin/PKGBUILD"
+          cp packaging/aur/doter-bin/.SRCINFO "$workdir/doter-bin/.SRCINFO"
+
+          pushd "$workdir/doter-bin" >/dev/null
+          git config user.name "${AUR_GIT_AUTHOR_NAME:-github-actions[bot]}"
+          git config user.email "${AUR_GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+
+          if git diff --quiet -- PKGBUILD .SRCINFO; then
+            echo "AUR package is already up to date."
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO
+          git commit -m "release: ${{ steps.prepare.outputs.tag }}"
+          git push origin HEAD
+          popd >/dev/null

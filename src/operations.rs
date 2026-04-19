@@ -2,9 +2,22 @@ use crate::model::{DotfileEntry, ManagedRecord, ManagedState, OperationResult, O
 use crate::scanner::stable_id;
 use crate::state::{AppPaths, PersistedState};
 use anyhow::{Result, anyhow};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileCopyMode {
+    KeepExisting,
+    OverwriteExisting,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProfileCopyPreview {
+    pub managed_entries: usize,
+    pub conflict_paths: Vec<PathBuf>,
+}
 
 pub fn enable_entry(
     state: &mut PersistedState,
@@ -292,6 +305,149 @@ pub fn remove_profile(
     Ok(result)
 }
 
+pub fn preview_profile_copy(
+    state: &PersistedState,
+    source_profile: &str,
+    destination_profile: &str,
+) -> Result<ProfileCopyPreview> {
+    if source_profile == destination_profile {
+        return Err(anyhow!("Choose two different profiles"));
+    }
+    if !state
+        .config
+        .profiles
+        .iter()
+        .any(|profile| profile == source_profile)
+    {
+        return Err(anyhow!("Profile {source_profile} does not exist"));
+    }
+    if !state
+        .config
+        .profiles
+        .iter()
+        .any(|profile| profile == destination_profile)
+    {
+        return Err(anyhow!("Profile {destination_profile} does not exist"));
+    }
+
+    let repo_root = state
+        .config
+        .repo_root
+        .clone()
+        .ok_or_else(|| anyhow!("Configure a repository before copying profiles"))?;
+    let source_root = repo_root.join("profiles").join(source_profile);
+    let destination_root = repo_root.join("profiles").join(destination_profile);
+
+    let managed_entries = state
+        .managed_entries
+        .iter()
+        .filter(|record| record.profile == source_profile)
+        .count();
+    let mut conflict_paths = BTreeSet::new();
+    collect_profile_conflicts(&source_root, &destination_root, &mut conflict_paths)?;
+
+    Ok(ProfileCopyPreview {
+        managed_entries,
+        conflict_paths: conflict_paths.into_iter().collect(),
+    })
+}
+
+pub fn copy_profile(
+    state: &mut PersistedState,
+    source_profile: &str,
+    destination_profile: &str,
+    mode: ProfileCopyMode,
+) -> Result<OperationResult> {
+    let preview = preview_profile_copy(state, source_profile, destination_profile)?;
+    let repo_root = state
+        .config
+        .repo_root
+        .clone()
+        .ok_or_else(|| anyhow!("Configure a repository before copying profiles"))?;
+    let source_root = repo_root.join("profiles").join(source_profile);
+    let destination_root = repo_root.join("profiles").join(destination_profile);
+
+    if !source_root.exists() && preview.managed_entries == 0 {
+        return Err(anyhow!("Profile {source_profile} has no managed dotfiles to copy"));
+    }
+
+    let mut result = OperationResult {
+        success: true,
+        message: format!("Copied profile {source_profile} to {destination_profile}"),
+        filesystem_changes: Vec::new(),
+        git_changes: vec![format!(
+            "Updated profiles/{destination_profile} from profiles/{source_profile}"
+        )],
+    };
+
+    let mut copied_paths = 0usize;
+    let mut skipped_paths = 0usize;
+    if source_root.exists() {
+        let stats =
+            copy_profile_tree(&source_root, &destination_root, &destination_root, mode, &mut result)?;
+        copied_paths = stats.copied_paths;
+        skipped_paths = stats.skipped_paths;
+    }
+
+    let existing_backups = state
+        .managed_entries
+        .iter()
+        .filter(|record| record.profile == destination_profile)
+        .map(|record| (record.id.clone(), record.backup_path.clone()))
+        .collect::<HashMap<_, _>>();
+
+    for record in state
+        .managed_entries
+        .clone()
+        .into_iter()
+        .filter(|record| record.profile == source_profile)
+    {
+        let target_source = managed_path_for(
+            &repo_root,
+            destination_profile,
+            record.origin,
+            &record.active_path,
+        )?;
+        state.upsert_record(ManagedRecord {
+            id: stable_id(record.origin, &record.active_path),
+            profile: destination_profile.to_string(),
+            active_path: record.active_path.clone(),
+            managed_source: target_source,
+            backup_path: existing_backups
+                .get(&record.id)
+                .cloned()
+                .unwrap_or(None),
+            origin: record.origin,
+        });
+    }
+
+    if !state
+        .config
+        .profiles
+        .iter()
+        .any(|profile| profile == destination_profile)
+    {
+        state.config.profiles.push(destination_profile.to_string());
+        state.config.ensure_active_profile();
+    }
+
+    result.message = match mode {
+        ProfileCopyMode::KeepExisting if skipped_paths > 0 => format!(
+            "Copied profile {source_profile} to {destination_profile}; kept {skipped_paths} existing destination path(s)"
+        ),
+        ProfileCopyMode::OverwriteExisting if !preview.conflict_paths.is_empty() => format!(
+            "Copied profile {source_profile} to {destination_profile}; overwrote {} existing destination path(s)",
+            preview.conflict_paths.len()
+        ),
+        _ => format!(
+            "Copied profile {source_profile} to {destination_profile}; {} path(s) updated",
+            copied_paths
+        ),
+    };
+
+    Ok(result)
+}
+
 pub fn validate_conflict(entry: &DotfileEntry) -> Result<()> {
     if entry.managed_state == ManagedState::Conflicted {
         return Err(anyhow!(
@@ -404,6 +560,41 @@ fn ensure_conflict_managed_source(
     ))
 }
 
+fn collect_profile_conflicts(
+    source: &Path,
+    destination: &Path,
+    conflicts: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+
+    let source_meta = fs::symlink_metadata(source)?;
+    let destination_meta = fs::symlink_metadata(destination).ok();
+    if destination_meta.is_some() {
+        conflicts.insert(destination.to_path_buf());
+    }
+
+    if source_meta.is_dir() && !source_meta.file_type().is_symlink() {
+        if destination_meta
+            .as_ref()
+            .map(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            for entry in fs::read_dir(source)? {
+                let entry = entry?;
+                collect_profile_conflicts(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    conflicts,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn existing_managed_symlink_target(repo_root: &Path, active_path: &Path) -> Option<PathBuf> {
     let metadata = fs::symlink_metadata(active_path).ok()?;
     if !metadata.file_type().is_symlink() {
@@ -468,6 +659,102 @@ fn copy_path_preserving_links(source: &Path, destination: &Path) -> Result<()> {
     }
     fs::copy(source, destination)?;
     Ok(())
+}
+
+#[derive(Default)]
+struct CopyStats {
+    copied_paths: usize,
+    skipped_paths: usize,
+}
+
+fn copy_profile_tree(
+    source: &Path,
+    destination: &Path,
+    destination_root: &Path,
+    mode: ProfileCopyMode,
+    result: &mut OperationResult,
+) -> Result<CopyStats> {
+    let source_meta = fs::symlink_metadata(source)?;
+
+    if source_meta.is_dir() && !source_meta.file_type().is_symlink() {
+        let destination_meta = fs::symlink_metadata(destination).ok();
+        if let Some(meta) = destination_meta {
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                match mode {
+                    ProfileCopyMode::KeepExisting => {
+                        result.filesystem_changes.push(format!(
+                            "Kept existing {}",
+                            destination.display()
+                        ));
+                        return Ok(CopyStats {
+                            copied_paths: 0,
+                            skipped_paths: 1,
+                        });
+                    }
+                    ProfileCopyMode::OverwriteExisting => {
+                        remove_path(destination)?;
+                        result.filesystem_changes.push(format!(
+                            "Overwrote {}",
+                            destination.display()
+                        ));
+                    }
+                }
+            }
+        }
+
+        fs::create_dir_all(destination)?;
+        let mut stats = CopyStats::default();
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let child_stats = copy_profile_tree(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                destination_root,
+                mode,
+                result,
+            )?;
+            stats.copied_paths += child_stats.copied_paths;
+            stats.skipped_paths += child_stats.skipped_paths;
+        }
+        return Ok(stats);
+    }
+
+    if destination.exists() {
+        match mode {
+            ProfileCopyMode::KeepExisting => {
+                result
+                    .filesystem_changes
+                    .push(format!("Kept existing {}", destination.display()));
+                return Ok(CopyStats {
+                    copied_paths: 0,
+                    skipped_paths: 1,
+                });
+            }
+            ProfileCopyMode::OverwriteExisting => {
+                remove_path(destination)?;
+                result
+                    .filesystem_changes
+                    .push(format!("Overwrote {}", destination.display()));
+            }
+        }
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    copy_path_preserving_links(source, destination)?;
+    let label = destination
+        .strip_prefix(destination_root)
+        .unwrap_or(destination)
+        .display()
+        .to_string();
+    result
+        .filesystem_changes
+        .push(format!("Copied {label} into destination profile"));
+    Ok(CopyStats {
+        copied_paths: 1,
+        skipped_paths: 0,
+    })
 }
 
 fn restore_profile_record(record: &ManagedRecord, result: &mut OperationResult) -> Result<()> {
@@ -810,5 +1097,99 @@ mod tests {
         assert!(!repo_root.join("profiles/laptop").exists());
         assert_eq!(state.config.active_profile, "default");
         assert!(state.managed_entries.is_empty());
+    }
+
+    #[test]
+    fn previews_copy_conflicts_for_existing_destination_paths() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let source_root = repo_root.join("profiles/default/config/nvim");
+        let destination_root = repo_root.join("profiles/laptop/config/nvim");
+        std::fs::create_dir_all(source_root.join("lua")).unwrap();
+        std::fs::create_dir_all(&destination_root).unwrap();
+        std::fs::write(source_root.join("init.lua"), "source").unwrap();
+        std::fs::write(source_root.join("lua/plugins.lua"), "plugins").unwrap();
+        std::fs::write(destination_root.join("init.lua"), "dest").unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["default".to_string(), "laptop".to_string()],
+                active_profile: "default".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        let preview = preview_profile_copy(&state, "default", "laptop").unwrap();
+        assert_eq!(preview.conflict_paths.len(), 4);
+        assert!(preview
+            .conflict_paths
+            .iter()
+            .any(|path| path.ends_with("profiles/laptop/config")));
+        assert!(preview
+            .conflict_paths
+            .iter()
+            .any(|path| path.ends_with("profiles/laptop/config/nvim")));
+        assert!(preview
+            .conflict_paths
+            .iter()
+            .any(|path| path.ends_with("profiles/laptop/config/nvim/init.lua")));
+    }
+
+    #[test]
+    fn copies_profile_and_keeps_existing_destination_files() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let source_root = repo_root.join("profiles/default/config/nvim");
+        let destination_root = repo_root.join("profiles/laptop/config/nvim");
+        std::fs::create_dir_all(source_root.join("lua")).unwrap();
+        std::fs::create_dir_all(&destination_root).unwrap();
+        std::fs::write(source_root.join("init.lua"), "source init").unwrap();
+        std::fs::write(source_root.join("lua/plugins.lua"), "plugins").unwrap();
+        std::fs::write(destination_root.join("init.lua"), "dest init").unwrap();
+
+        let active_path = dirs::home_dir()
+            .unwrap()
+            .join(".config/nvim");
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root.clone()),
+                profiles: vec!["default".to_string(), "laptop".to_string()],
+                active_profile: "default".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![ManagedRecord {
+                id: "xdg:/tmp/nvim".to_string(),
+                profile: "default".to_string(),
+                active_path: active_path.clone(),
+                managed_source: source_root.clone(),
+                backup_path: None,
+                origin: OriginScope::XdgConfig,
+            }],
+        };
+
+        let result = copy_profile(
+            &mut state,
+            "default",
+            "laptop",
+            ProfileCopyMode::KeepExisting,
+        )
+        .unwrap();
+
+        assert!(result.success);
+        assert_eq!(
+            std::fs::read_to_string(destination_root.join("init.lua")).unwrap(),
+            "dest init"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination_root.join("lua/plugins.lua")).unwrap(),
+            "plugins"
+        );
+        assert!(state.managed_entries.iter().any(|record| {
+            record.profile == "laptop"
+                && record.active_path == active_path
+                && record.managed_source == destination_root
+        }));
     }
 }

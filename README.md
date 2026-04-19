@@ -37,18 +37,18 @@ Build a distributable archive containing the binary, desktop file, and icon:
 
 This writes a tarball to `dist/` that can be uploaded to a GitHub release and consumed by the AUR `doter-bin` package.
 
+## Releases
+
+The GitHub Actions release workflow supports two paths:
+
+- Push an existing `vX.Y.Z` tag to build the archive, publish the GitHub release, and push updated AUR metadata.
+- Run the `release` workflow manually to auto-bump the version before release. The bump rule is patch-first within a single decimal digit, so `0.0.8 -> 0.0.9`, `0.0.9 -> 0.1.0`, and `0.1.9 -> 0.2.0`.
+
+For AUR publishing, configure an `AUR_SSH_PRIVATE_KEY` repository secret with push access to `doter-bin` on AUR. Optional repository variables `AUR_GIT_AUTHOR_NAME` and `AUR_GIT_AUTHOR_EMAIL` can override the default commit identity used for AUR updates.
+
 ## AUR
 
-The AUR package metadata lives in `packaging/aur/doter-bin/`.
-
-After you rename the GitHub repository to `doter` and upload the release tarball, update `pkgver` if needed and regenerate `.SRCINFO` with:
-
-```bash
-cd packaging/aur/doter-bin
-makepkg --printsrcinfo > .SRCINFO
-```
-
-Before submitting to AUR, add a real project license. The current package metadata uses `custom` as a temporary placeholder because the repository does not include a license file yet.
+The AUR package metadata lives in the repository and is updated by the release workflow after each published version.
 
 ## License
 

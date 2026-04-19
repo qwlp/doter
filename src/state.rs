@@ -1,6 +1,7 @@
 use crate::model::{AppConfig, ManagedRecord};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +61,7 @@ impl PersistedState {
             let loaded: Self = toml::from_str(&content).context("Failed to parse state.toml")?;
             state.managed_entries = loaded.managed_entries;
         }
+        state.sync_profiles_from_repo()?;
         state.config.ensure_active_profile();
         Ok(state)
     }
@@ -111,6 +113,43 @@ impl PersistedState {
             self.managed_entries.push(record);
         }
     }
+
+    pub fn sync_profiles_from_repo(&mut self) -> Result<bool> {
+        let Some(repo_root) = self.config.repo_root.as_ref() else {
+            self.config.ensure_active_profile();
+            return Ok(false);
+        };
+
+        let profiles_root = repo_root.join("profiles");
+        if !profiles_root.exists() {
+            self.config.ensure_active_profile();
+            return Ok(false);
+        }
+
+        let original = self.config.profiles.clone();
+        let mut discovered = BTreeSet::new();
+
+        for entry in fs::read_dir(&profiles_root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            discovered.insert(name.to_string());
+        }
+
+        if !discovered.is_empty() {
+            self.config.profiles = discovered.into_iter().collect();
+        }
+        self.config.ensure_active_profile();
+        Ok(self.config.profiles != original)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +178,57 @@ mod tests {
 
         assert!(state.prune_stale_managed_entries());
         assert!(state.managed_entries.is_empty());
+    }
+
+    #[test]
+    fn syncs_profiles_from_repo_root() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        std::fs::create_dir_all(repo_root.join("profiles/laptop")).unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["default".to_string()],
+                active_profile: "default".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        let changed = state.sync_profiles_from_repo().unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            state.config.profiles,
+            vec!["desktop-arch".to_string(), "laptop".to_string()]
+        );
+    }
+
+    #[test]
+    fn preserves_active_profile_when_found_on_disk() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["default".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        state.sync_profiles_from_repo().unwrap();
+
+        assert_eq!(state.config.active_profile, "desktop-arch");
+        assert!(state
+            .config
+            .profiles
+            .iter()
+            .any(|profile| profile == "desktop-arch"));
     }
 }

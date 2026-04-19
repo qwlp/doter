@@ -3,6 +3,7 @@ use crate::model::{DotfileEntry, EntryKind, GitRepoState, ManagedState, ScanRepo
 use crate::operations;
 use crate::scanner;
 use crate::state::{AppPaths, PersistedState};
+use anyhow::anyhow;
 use gio::prelude::*;
 use glib::translate::IntoGlib;
 use glib::ControlFlow;
@@ -33,8 +34,10 @@ struct Widgets {
     kind_filter_combo: ComboBoxText,
     sort_combo: ComboBoxText,
     new_profile_button: Button,
+    copy_profile_button: Button,
     remove_profile_button: Button,
     open_repo_root_button: Button,
+    settings_button: Button,
     stage_all_button: Button,
     sync_button: Button,
     notice_revealer: Revealer,
@@ -71,7 +74,6 @@ struct Widgets {
     auto_commit_button: Button,
     commit_button: Button,
     push_button: Button,
-    remote_button: Button,
     open_live_button: Button,
     open_repo_button: Button,
     reveal_button: Button,
@@ -151,6 +153,11 @@ const DIFF_LINE_LIMIT: usize = 12_000;
 const DIFF_PREVIEW_CHAR_LIMIT: usize = 140_000;
 const DIFF_PREVIEW_LINE_LIMIT: usize = 2_000;
 const DIFF_RENDER_LINE_LIMIT: usize = 3_500;
+const MAIN_LEFT_PANEL_MIN_WIDTH: i32 = 360;
+const MAIN_RIGHT_PANEL_MIN_WIDTH: i32 = 560;
+const WORKSPACE_SIDEBAR_MIN_WIDTH: i32 = 220;
+const WORKSPACE_EDITOR_MIN_WIDTH: i32 = 360;
+const DIFF_PANEL_MIN_WIDTH: i32 = 280;
 
 pub fn build(app: &Application) {
     let paths = match AppPaths::discover() {
@@ -220,12 +227,13 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     content.set_position(480);
     content.set_hexpand(true);
     content.set_vexpand(true);
-    content.set_shrink_start_child(true);
-    content.set_shrink_end_child(true);
+    content.set_shrink_start_child(false);
+    content.set_shrink_end_child(false);
 
     let left_panel = GtkBox::new(Orientation::Vertical, 10);
     left_panel.set_hexpand(true);
     left_panel.set_vexpand(true);
+    left_panel.set_width_request(MAIN_LEFT_PANEL_MIN_WIDTH);
 
     let dotfiles_header = GtkBox::new(Orientation::Horizontal, 8);
     let left_heading = section_heading("Dotfiles", "folder-symbolic");
@@ -239,9 +247,10 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let profile_combo = ComboBoxText::new();
     let refresh_button = icon_button("view-refresh-symbolic", "Refresh");
     let new_profile_button = icon_button("list-add-symbolic", "New");
+    let copy_profile_button = icon_button("edit-copy-symbolic", "Copy");
     let remove_profile_button = icon_button("user-trash-symbolic", "Remove");
     let open_repo_root_button = icon_button("folder-open-symbolic", "Open Repo");
-    let remote_button = icon_button("network-server-symbolic", "Remote");
+    let settings_button = icon_button("emblem-system-symbolic", "Settings");
     let filter_grid = Grid::new();
     filter_grid.set_row_spacing(8);
     filter_grid.set_column_spacing(8);
@@ -249,9 +258,10 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     filter_grid.attach(&profile_combo, 0, 1, 2, 1);
     filter_grid.attach(&refresh_button, 2, 1, 1, 1);
     filter_grid.attach(&new_profile_button, 3, 1, 1, 1);
-    filter_grid.attach(&remove_profile_button, 0, 2, 1, 1);
-    filter_grid.attach(&open_repo_root_button, 1, 2, 2, 1);
-    filter_grid.attach(&remote_button, 3, 2, 1, 1);
+    filter_grid.attach(&copy_profile_button, 0, 2, 1, 1);
+    filter_grid.attach(&remove_profile_button, 1, 2, 1, 1);
+    filter_grid.attach(&open_repo_root_button, 2, 2, 1, 1);
+    filter_grid.attach(&settings_button, 3, 2, 1, 1);
 
     let filter_controls = Grid::new();
     filter_controls.set_row_spacing(8);
@@ -334,6 +344,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     right_panel.set_margin_end(8);
     right_panel.set_hexpand(true);
     right_panel.set_vexpand(true);
+    right_panel.set_width_request(MAIN_RIGHT_PANEL_MIN_WIDTH);
 
     let overview_section = GtkBox::new(Orientation::Vertical, 14);
     let overview_card = GtkBox::new(Orientation::Vertical, 10);
@@ -432,6 +443,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let explorer_shell = GtkBox::new(Orientation::Vertical, 8);
     explorer_shell.add_css_class("section-content");
     explorer_shell.add_css_class("workspace-sidebar");
+    explorer_shell.set_width_request(WORKSPACE_SIDEBAR_MIN_WIDTH);
     let explorer_label = Label::new(Some("Explorer"));
     explorer_label.set_xalign(0.0);
     explorer_label.add_css_class("heading");
@@ -512,6 +524,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let editor_page = GtkBox::new(Orientation::Vertical, 6);
     editor_page.set_hexpand(true);
     editor_page.set_vexpand(true);
+    editor_page.set_width_request(WORKSPACE_EDITOR_MIN_WIDTH);
     editor_page.append(&repo_editor_header);
     editor_page.append(&editor_body);
 
@@ -567,12 +580,14 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     diff_base_panel.add_css_class("section-content");
     diff_base_panel.set_hexpand(true);
     diff_base_panel.set_vexpand(true);
+    diff_base_panel.set_width_request(DIFF_PANEL_MIN_WIDTH);
     diff_base_panel.append(&diff_base_title);
     diff_base_panel.append(&diff_base_scroll);
     let diff_current_panel = GtkBox::new(Orientation::Vertical, 6);
     diff_current_panel.add_css_class("section-content");
     diff_current_panel.set_hexpand(true);
     diff_current_panel.set_vexpand(true);
+    diff_current_panel.set_width_request(DIFF_PANEL_MIN_WIDTH);
     diff_current_panel.append(&diff_current_title);
     diff_current_panel.append(&diff_current_scroll);
     let diff_split = Paned::new(Orientation::Horizontal);
@@ -580,8 +595,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     diff_split.set_position(420);
     diff_split.set_hexpand(true);
     diff_split.set_vexpand(true);
-    diff_split.set_shrink_start_child(true);
-    diff_split.set_shrink_end_child(true);
+    diff_split.set_shrink_start_child(false);
+    diff_split.set_shrink_end_child(false);
     diff_split.set_start_child(Some(&diff_base_panel));
     diff_split.set_end_child(Some(&diff_current_panel));
     let diff_page = GtkBox::new(Orientation::Vertical, 6);
@@ -600,8 +615,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     workspace_split.set_position(250);
     workspace_split.set_hexpand(true);
     workspace_split.set_vexpand(true);
-    workspace_split.set_shrink_start_child(true);
-    workspace_split.set_shrink_end_child(true);
+    workspace_split.set_shrink_start_child(false);
+    workspace_split.set_shrink_end_child(false);
     workspace_split.set_start_child(Some(&explorer_shell));
     workspace_split.set_end_child(Some(&workspace_stack));
 
@@ -638,6 +653,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         kind_filter_combo,
         sort_combo,
         new_profile_button,
+        copy_profile_button,
         remove_profile_button,
         open_repo_root_button,
         stage_all_button,
@@ -676,7 +692,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         auto_commit_button,
         commit_button,
         push_button,
-        remote_button,
+        settings_button,
         open_live_button,
         open_repo_button,
         reveal_button,
@@ -890,6 +906,14 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
     bind_button(
         runtime.clone(),
         |runtime| {
+            prompt_copy_profile(runtime);
+        },
+        |widgets| widgets.copy_profile_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
             remove_active_profile(runtime);
         },
         |widgets| widgets.remove_profile_button.clone(),
@@ -970,9 +994,9 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
     bind_button(
         runtime.clone(),
         |runtime| {
-            prompt_remote(runtime);
+            prompt_settings(runtime, false);
         },
-        |widgets| widgets.remote_button.clone(),
+        |widgets| widgets.settings_button.clone(),
     );
 
     bind_button(
@@ -1076,56 +1100,122 @@ where
 
 fn ensure_repo_then_refresh(runtime: Rc<RefCell<AppRuntime>>) {
     sync_profile_combo(&runtime);
-    let repo_missing = runtime.borrow().persisted.config.repo_root.is_none();
-    if repo_missing {
-        prompt_repo_setup(runtime);
+    let (repo_missing, onboarding_complete) = {
+        let guard = runtime.borrow();
+        (
+            guard.persisted.config.repo_root.is_none(),
+            guard.persisted.config.onboarding_complete,
+        )
+    };
+    if repo_missing && !onboarding_complete {
+        prompt_settings(runtime, true);
     } else {
         refresh(runtime);
     }
 }
 
-fn prompt_repo_setup(runtime: Rc<RefCell<AppRuntime>>) {
-    let default_repo = dirs::home_dir()
+fn default_repo_path() -> PathBuf {
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".dotfiles");
+        .join(".dotfiles")
+}
+
+fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
+    let default_repo = default_repo_path();
     let widgets = runtime.borrow().widgets.clone();
+    let (repo_root, current_remote_name) = {
+        let guard = runtime.borrow();
+        (
+            guard.persisted.config.repo_root.clone(),
+            guard.persisted.config.remote_name.clone(),
+        )
+    };
+    let repo_root = repo_root.unwrap_or(default_repo);
+    let current_remote_url = runtime
+        .borrow()
+        .persisted
+        .config
+        .repo_root
+        .as_deref()
+        .and_then(|root| git::remote_url(root, &current_remote_name).ok().flatten())
+        .unwrap_or_default();
     let dialog = Dialog::builder()
-        .title("Configure dotfiles repository")
+        .title(if onboarding {
+            "Set up dotfiles repository"
+        } else {
+            "Settings"
+        })
         .transient_for(&widgets.window)
         .modal(true)
         .build();
-    dialog.add_button("Later", ResponseType::Cancel);
-    dialog.add_button("Create or Open", ResponseType::Accept);
+    dialog.add_button(if onboarding { "Later" } else { "Cancel" }, ResponseType::Cancel);
     dialog.add_button("Choose Folder", ResponseType::Other(1));
+    dialog.add_button("Use Folder", ResponseType::Accept);
+    dialog.add_button("Import Repo", ResponseType::Other(2));
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 8);
     let description = Label::new(Some(
-        "Doter needs a git repository to store managed dotfiles. Create one or point to an existing directory.",
+        if onboarding {
+            "Choose where your dotfiles repo should live locally. You can point Doter at an existing local repository or import one from a Git or GitHub URL. You can change this later from Settings."
+        } else {
+            "Update the local dotfiles repository path, optionally import a repo from a Git URL, or adjust the git remote used by Doter."
+        },
     ));
     description.set_wrap(true);
     description.set_xalign(0.0);
-    let entry = Entry::new();
-    entry.set_text(&default_repo.to_string_lossy());
+    let repo_path_entry = Entry::new();
+    repo_path_entry.set_text(&repo_root.to_string_lossy());
+    repo_path_entry.set_placeholder_text(Some("/home/user/.dotfiles"));
+    let import_url_entry = Entry::new();
+    import_url_entry.set_placeholder_text(Some("git@github.com:user/dotfiles.git"));
+    let remote_name_entry = Entry::new();
+    remote_name_entry.set_placeholder_text(Some("origin"));
+    remote_name_entry.set_text(&current_remote_name);
+    let remote_url_entry = Entry::new();
+    remote_url_entry.set_placeholder_text(Some("git@github.com:user/dotfiles.git"));
+    remote_url_entry.set_text(&current_remote_url);
     box_.append(&description);
-    box_.append(&entry);
+    box_.append(&Label::new(Some("Local repository path")));
+    box_.append(&repo_path_entry);
+    box_.append(&Label::new(Some("Import from Git URL")));
+    box_.append(&import_url_entry);
+    box_.append(&Label::new(Some("Remote name")));
+    box_.append(&remote_name_entry);
+    box_.append(&Label::new(Some("Remote URL")));
+    box_.append(&remote_url_entry);
     content.append(&box_);
 
     {
         let runtime = runtime.clone();
-        let entry = entry.clone();
+        let repo_path_entry = repo_path_entry.clone();
+        let import_url_entry = import_url_entry.clone();
+        let remote_name_entry = remote_name_entry.clone();
+        let remote_url_entry = remote_url_entry.clone();
         dialog.connect_response(move |dialog, response| match response {
             ResponseType::Accept => {
-                let path = PathBuf::from(entry.text().to_string());
-                match create_or_open_repo(&runtime, &path) {
+                let path = PathBuf::from(repo_path_entry.text().trim().to_string());
+                let remote_name = remote_name_entry.text().trim().to_string();
+                let remote_url = remote_url_entry.text().trim().to_string();
+                match create_or_open_repo(&runtime, &path, onboarding) {
                     Ok(()) => {
+                        if let Err(error) =
+                            save_remote_settings(&runtime, remote_name, remote_url, onboarding)
+                        {
+                            show_message(
+                                &runtime.borrow().widgets.window,
+                                "Settings failed",
+                                &error.to_string(),
+                            );
+                            return;
+                        }
                         dialog.close();
                         refresh(runtime.clone());
                     }
                     Err(error) => {
                         show_message(
                             &runtime.borrow().widgets.window,
-                            "Repository setup failed",
+                            "Settings failed",
                             &error.to_string(),
                         );
                     }
@@ -1139,20 +1229,12 @@ fn prompt_repo_setup(runtime: Rc<RefCell<AppRuntime>>) {
                     .accept_label("Select")
                     .cancel_label("Cancel")
                     .build();
-                let runtime = runtime.clone();
+                let repo_path_entry = repo_path_entry.clone();
                 chooser.connect_response(move |chooser, response| {
                     if response == ResponseType::Accept {
                         if let Some(file) = chooser.file() {
                             if let Some(path) = file.path() {
-                                if let Err(error) = create_or_open_repo(&runtime, &path) {
-                                    show_message(
-                                        &runtime.borrow().widgets.window,
-                                        "Repository setup failed",
-                                        &error.to_string(),
-                                    );
-                                } else {
-                                    refresh(runtime.clone());
-                                }
+                                repo_path_entry.set_text(&path.to_string_lossy());
                             }
                         }
                     }
@@ -1160,14 +1242,59 @@ fn prompt_repo_setup(runtime: Rc<RefCell<AppRuntime>>) {
                 });
                 chooser.show();
             }
-            _ => dialog.close(),
+            ResponseType::Other(2) => {
+                let path = PathBuf::from(repo_path_entry.text().trim().to_string());
+                let import_url = import_url_entry.text().trim().to_string();
+                let remote_name = remote_name_entry.text().trim().to_string();
+                let remote_url = remote_url_entry.text().trim().to_string();
+                match clone_repo_to_path(&runtime, &import_url, &path, onboarding) {
+                    Ok(()) => {
+                        if let Err(error) =
+                            save_remote_settings(&runtime, remote_name, remote_url, onboarding)
+                        {
+                            show_message(
+                                &runtime.borrow().widgets.window,
+                                "Import failed",
+                                &error.to_string(),
+                            );
+                            return;
+                        }
+                        dialog.close();
+                        refresh(runtime.clone());
+                    }
+                    Err(error) => {
+                        show_message(
+                            &runtime.borrow().widgets.window,
+                            "Import failed",
+                            &error.to_string(),
+                        );
+                    }
+                }
+            }
+            _ => {
+                if onboarding {
+                    if let Ok(mut guard) = runtime.try_borrow_mut() {
+                        guard.persisted.config.onboarding_complete = true;
+                        let _ = guard.persisted.save(&guard.paths);
+                    }
+                }
+                dialog.close();
+                refresh(runtime.clone());
+            }
         });
     }
 
     dialog.present();
 }
 
-fn create_or_open_repo(runtime: &Rc<RefCell<AppRuntime>>, path: &Path) -> anyhow::Result<()> {
+fn create_or_open_repo(
+    runtime: &Rc<RefCell<AppRuntime>>,
+    path: &Path,
+    onboarding: bool,
+) -> anyhow::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!("Repository path is required"));
+    }
     let repo_root = if let Some(existing) = git::detect_repo(path)? {
         existing
     } else {
@@ -1176,14 +1303,77 @@ fn create_or_open_repo(runtime: &Rc<RefCell<AppRuntime>>, path: &Path) -> anyhow
     {
         let mut guard = runtime.borrow_mut();
         guard.persisted.config.repo_root = Some(repo_root);
+        if onboarding {
+            guard.persisted.config.onboarding_complete = true;
+        }
+        guard.persisted.sync_profiles_from_repo()?;
         guard.persisted.save(&guard.paths)?;
     }
+    Ok(())
+}
+
+fn clone_repo_to_path(
+    runtime: &Rc<RefCell<AppRuntime>>,
+    url: &str,
+    path: &Path,
+    onboarding: bool,
+) -> anyhow::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!("Repository path is required"));
+    }
+    let repo_root = git::clone_repo(url, path)?;
+    let mut guard = runtime.borrow_mut();
+    guard.persisted.config.repo_root = Some(repo_root);
+    if onboarding {
+        guard.persisted.config.onboarding_complete = true;
+    }
+    guard.persisted.sync_profiles_from_repo()?;
+    guard.persisted.save(&guard.paths)?;
+    Ok(())
+}
+
+fn save_remote_settings(
+    runtime: &Rc<RefCell<AppRuntime>>,
+    remote_name: String,
+    remote_url: String,
+    onboarding: bool,
+) -> anyhow::Result<()> {
+    let repo_root = runtime.borrow().persisted.config.repo_root.clone();
+    let Some(repo_root) = repo_root else {
+        if onboarding {
+            let mut guard = runtime.borrow_mut();
+            guard.persisted.config.onboarding_complete = true;
+            guard.persisted.save(&guard.paths)?;
+        }
+        return Ok(());
+    };
+
+    let remote_name = if remote_name.trim().is_empty() {
+        "origin".to_string()
+    } else {
+        remote_name
+    };
+    let previous_name = runtime.borrow().persisted.config.remote_name.clone();
+    if !remote_url.trim().is_empty() {
+        git::update_remote(&repo_root, &previous_name, &remote_name, &remote_url)?;
+    }
+
+    let mut guard = runtime.borrow_mut();
+    guard.persisted.config.remote_name = remote_name;
+    if onboarding {
+        guard.persisted.config.onboarding_complete = true;
+    }
+    let paths = guard.paths.clone();
+    guard.persisted.save(&paths)?;
     Ok(())
 }
 
 fn refresh(runtime: Rc<RefCell<AppRuntime>>) {
     {
         let mut guard = runtime.borrow_mut();
+        if guard.persisted.sync_profiles_from_repo().unwrap_or(false) {
+            let _ = guard.persisted.save(&guard.paths);
+        }
         if guard.persisted.prune_stale_managed_entries() {
             let _ = guard.persisted.save(&guard.paths);
         }
@@ -2818,6 +3008,14 @@ fn enable_selected(runtime: Rc<RefCell<AppRuntime>>) {
         );
         return;
     };
+    if entry.managed_state == ManagedState::ManagedActive {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Already enabled",
+            "This dotfile is already active for the current profile.",
+        );
+        return;
+    }
     let (title, body) = if entry.managed_state == ManagedState::Conflicted {
         (
             "Repair conflict",
@@ -2873,6 +3071,14 @@ fn disable_selected(runtime: Rc<RefCell<AppRuntime>>) {
         );
         return;
     };
+    if entry.managed_state != ManagedState::ManagedActive {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Not enabled",
+            "This dotfile is not currently active for the selected profile.",
+        );
+        return;
+    }
     let confirm = confirm_action(
         &runtime.borrow().widgets.window,
         "Disable dotfile",
@@ -3324,6 +3530,21 @@ fn prompt_new_profile(runtime: Rc<RefCell<AppRuntime>>) {
                         );
                         return;
                     }
+                    if let Some(repo_root) = guard.persisted.config.repo_root.clone() {
+                        let profile_root = repo_root.join("profiles").join(&name);
+                        if let Err(error) = fs::create_dir_all(&profile_root) {
+                            show_message(
+                                &runtime.borrow().widgets.window,
+                                "Create profile failed",
+                                &format!(
+                                    "Failed to create {}: {}",
+                                    profile_root.display(),
+                                    error
+                                ),
+                            );
+                            return;
+                        }
+                    }
                     guard.persisted.config.profiles.push(name.clone());
                     guard.persisted.config.active_profile = name.clone();
                     guard.persisted.config.ensure_active_profile();
@@ -3339,6 +3560,236 @@ fn prompt_new_profile(runtime: Rc<RefCell<AppRuntime>>) {
     }
 
     dialog.present();
+}
+
+fn prompt_copy_profile(runtime: Rc<RefCell<AppRuntime>>) {
+    let widgets = runtime.borrow().widgets.clone();
+    let profiles = runtime.borrow().persisted.config.profiles.clone();
+    if profiles.len() < 2 {
+        show_message(
+            &widgets.window,
+            "Not enough profiles",
+            "Create another profile first, then copy dotfiles into it.",
+        );
+        return;
+    }
+
+    let active_profile = runtime.borrow().persisted.config.active_profile.clone();
+    let dialog = Dialog::builder()
+        .title("Copy profile dotfiles")
+        .transient_for(&widgets.window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Continue", ResponseType::Accept);
+
+    let content = dialog.content_area();
+    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    let description = Label::new(Some(
+        "Copy managed dotfiles from one profile into another. If the destination already has files at the same repo paths, you will choose whether to keep them or overwrite them before anything is changed.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    let source_combo = ComboBoxText::new();
+    let destination_combo = ComboBoxText::new();
+    for profile in &profiles {
+        source_combo.append_text(profile);
+        destination_combo.append_text(profile);
+    }
+    let active_index = profiles
+        .iter()
+        .position(|profile| profile == &active_profile)
+        .map(|index| index as u32);
+    source_combo.set_active(active_index);
+    let destination_index = profiles
+        .iter()
+        .position(|profile| profile != &active_profile)
+        .map(|index| index as u32)
+        .or(active_index);
+    destination_combo.set_active(destination_index);
+
+    let source_label = Label::new(Some("Source profile"));
+    source_label.set_xalign(0.0);
+    let destination_label = Label::new(Some("Destination profile"));
+    destination_label.set_xalign(0.0);
+    box_.append(&description);
+    box_.append(&source_label);
+    box_.append(&source_combo);
+    box_.append(&destination_label);
+    box_.append(&destination_combo);
+    content.append(&box_);
+
+    {
+        let runtime = runtime.clone();
+        let source_combo = source_combo.clone();
+        let destination_combo = destination_combo.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response != ResponseType::Accept {
+                dialog.close();
+                return;
+            }
+
+            let source = source_combo
+                .active_text()
+                .map(|text| text.to_string())
+                .unwrap_or_default();
+            let destination = destination_combo
+                .active_text()
+                .map(|text| text.to_string())
+                .unwrap_or_default();
+            if source.is_empty() || destination.is_empty() {
+                show_message(
+                    &runtime.borrow().widgets.window,
+                    "Choose profiles",
+                    "Select both a source profile and a destination profile.",
+                );
+                return;
+            }
+            if source == destination {
+                show_message(
+                    &runtime.borrow().widgets.window,
+                    "Choose different profiles",
+                    "The source and destination profiles must be different.",
+                );
+                return;
+            }
+
+            let preview = {
+                let guard = runtime.borrow();
+                operations::preview_profile_copy(&guard.persisted, &source, &destination)
+            };
+            let preview = match preview {
+                Ok(preview) => preview,
+                Err(error) => {
+                    show_message(
+                        &runtime.borrow().widgets.window,
+                        "Copy preview failed",
+                        &error.to_string(),
+                    );
+                    return;
+                }
+            };
+
+            let mode = if preview.conflict_paths.is_empty() {
+                let confirm = confirm_action(
+                    &runtime.borrow().widgets.window,
+                    "Copy profile",
+                    &format!(
+                        "Copy {} managed entr{} from '{}' into '{}'? No destination repo paths will be overwritten.",
+                        preview.managed_entries,
+                        if preview.managed_entries == 1 { "y" } else { "ies" },
+                        source,
+                        destination
+                    ),
+                );
+                if !confirm {
+                    return;
+                }
+                operations::ProfileCopyMode::KeepExisting
+            } else {
+                let choices = present_profile_copy_conflict_dialog(
+                    &runtime.borrow().widgets.window,
+                    &source,
+                    &destination,
+                    &preview.conflict_paths,
+                );
+                let Some(mode) = choices else {
+                    return;
+                };
+                mode
+            };
+
+            dialog.close();
+            run_profile_copy(runtime.clone(), source, destination, mode);
+        });
+    }
+
+    dialog.present();
+}
+
+fn present_profile_copy_conflict_dialog(
+    window: &ApplicationWindow,
+    source: &str,
+    destination: &str,
+    conflict_paths: &[PathBuf],
+) -> Option<operations::ProfileCopyMode> {
+    let dialog = Dialog::builder()
+        .title("Destination already has dotfiles")
+        .transient_for(window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Keep Existing", ResponseType::Reject);
+    dialog.add_button("Overwrite Existing", ResponseType::Accept);
+
+    let content = dialog.content_area();
+    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    let preview_lines = conflict_paths
+        .iter()
+        .take(8)
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>();
+    let mut body = format!(
+        "Copying '{}' into '{}' would touch {} existing destination path(s).\n\nKeep Existing: skip those paths and leave the destination copy as-is.\nOverwrite Existing: replace those destination paths with the source profile copy.",
+        source,
+        destination,
+        conflict_paths.len()
+    );
+    if !preview_lines.is_empty() {
+        body.push_str("\n\nExamples:\n");
+        body.push_str(&preview_lines.join("\n"));
+        if conflict_paths.len() > preview_lines.len() {
+            body.push_str(&format!(
+                "\n... and {} more",
+                conflict_paths.len() - preview_lines.len()
+            ));
+        }
+    }
+
+    let label = Label::new(Some(&body));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    content.append(&box_);
+    box_.append(&label);
+
+    let response = glib::MainContext::default().block_on(dialog.run_future());
+    dialog.close();
+    match response {
+        ResponseType::Accept => Some(operations::ProfileCopyMode::OverwriteExisting),
+        ResponseType::Reject => Some(operations::ProfileCopyMode::KeepExisting),
+        _ => None,
+    }
+}
+
+fn run_profile_copy(
+    runtime: Rc<RefCell<AppRuntime>>,
+    source: String,
+    destination: String,
+    mode: operations::ProfileCopyMode,
+) {
+    let result = {
+        let mut guard = runtime.borrow_mut();
+        let paths = guard.paths.clone();
+        let result = operations::copy_profile(&mut guard.persisted, &source, &destination, mode);
+        if result.is_ok() {
+            let _ = guard.persisted.save(&paths);
+        }
+        result
+    };
+
+    match result {
+        Ok(result) => {
+            let widgets = runtime.borrow().widgets.clone();
+            present_sync_notice(&widgets, "Profile copied", &result.message, false);
+            sync_profile_combo(&runtime);
+            refresh(runtime);
+        }
+        Err(error) => show_message(
+            &runtime.borrow().widgets.window,
+            "Copy profile failed",
+            &error.to_string(),
+        ),
+    }
 }
 
 fn remove_active_profile(runtime: Rc<RefCell<AppRuntime>>) {
@@ -3570,92 +4021,6 @@ fn reveal_selected(runtime: Rc<RefCell<AppRuntime>>) {
 
     let path = entry.path.parent().unwrap_or(&entry.path);
     let _ = Command::new("xdg-open").arg(path).spawn();
-}
-
-fn prompt_remote(runtime: Rc<RefCell<AppRuntime>>) {
-    let widgets = runtime.borrow().widgets.clone();
-    let (repo_root, current_remote_name) = {
-        let guard = runtime.borrow();
-        (
-            guard.persisted.config.repo_root.clone(),
-            guard.persisted.config.remote_name.clone(),
-        )
-    };
-    let current_remote_url = repo_root
-        .as_deref()
-        .and_then(|root| git::remote_url(root, &current_remote_name).ok().flatten())
-        .unwrap_or_default();
-
-    let dialog = Dialog::builder()
-        .title("Edit remote")
-        .transient_for(&widgets.window)
-        .modal(true)
-        .build();
-    dialog.add_button("Cancel", ResponseType::Cancel);
-    dialog.add_button("Save", ResponseType::Accept);
-
-    let content = dialog.content_area();
-    let box_ = GtkBox::new(Orientation::Vertical, 8);
-    let description = Label::new(Some("Configure the git remote name and URL:"));
-    description.set_wrap(true);
-    description.set_xalign(0.0);
-    let name_entry = Entry::new();
-    name_entry.set_placeholder_text(Some("origin"));
-    name_entry.set_text(&current_remote_name);
-    let url_entry = Entry::new();
-    url_entry.set_placeholder_text(Some("git@github.com:user/dotfiles.git"));
-    url_entry.set_text(&current_remote_url);
-    box_.append(&description);
-    box_.append(&name_entry);
-    box_.append(&url_entry);
-    content.append(&box_);
-
-    {
-        let runtime = runtime.clone();
-        let name_entry = name_entry.clone();
-        let url_entry = url_entry.clone();
-        dialog.connect_response(move |dialog, response| {
-            if response == ResponseType::Accept {
-                let name = name_entry.text().trim().to_string();
-                let url = url_entry.text().trim().to_string();
-                if name.is_empty() || url.is_empty() {
-                    show_message(
-                        &runtime.borrow().widgets.window,
-                        "Invalid remote",
-                        "Remote name and URL are required.",
-                    );
-                    return;
-                }
-                let repo_root = runtime.borrow().persisted.config.repo_root.clone();
-                if let Some(repo_root) = repo_root {
-                    let previous_name = runtime.borrow().persisted.config.remote_name.clone();
-                    match git::update_remote(&repo_root, &previous_name, &name, &url) {
-                        Ok(()) => {
-                            {
-                                let mut guard = runtime.borrow_mut();
-                                guard.persisted.config.remote_name = name;
-                                let paths = guard.paths.clone();
-                                let _ = guard.persisted.save(&paths);
-                            }
-                            dialog.close();
-                            refresh(runtime.clone());
-                        }
-                        Err(error) => {
-                            show_message(
-                                &runtime.borrow().widgets.window,
-                                "Failed to set remote",
-                                &error.to_string(),
-                            );
-                        }
-                    }
-                }
-            } else {
-                dialog.close();
-            }
-        });
-    }
-
-    dialog.present();
 }
 
 fn reload_repo_editor_action(runtime: Rc<RefCell<AppRuntime>>) {
