@@ -36,6 +36,8 @@ pub struct DotfileEntry {
     pub symlink_target: Option<PathBuf>,
     pub backup_path: Option<PathBuf>,
     pub warning: Option<String>,
+    #[serde(default)]
+    pub shared_profiles: Vec<String>,
 }
 
 impl DotfileEntry {

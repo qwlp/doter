@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 const APP_DIR: &str = "doter";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
+const PROFILE_CUSTOM_PATHS_FILE: &str = "custom-paths.toml";
+const SHARED_LINKS_FILE: &str = "links.toml";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -47,6 +49,26 @@ impl AppPaths {
 pub struct PersistedState {
     pub config: AppConfig,
     pub managed_entries: Vec<ManagedRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ProfileCustomPathsFile {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SharedLinksFile {
+    #[serde(default)]
+    pub entries: Vec<SharedLinkEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedLinkEntry {
+    pub origin: crate::model::OriginScope,
+    pub key: String,
+    #[serde(default)]
+    pub profiles: Vec<String>,
 }
 
 impl PersistedState {
@@ -150,6 +172,187 @@ impl PersistedState {
         self.config.ensure_active_profile();
         Ok(self.config.profiles != original)
     }
+
+    pub fn resolve_active_custom_paths_for_roots(
+        &self,
+        home_root: &Path,
+        xdg_root: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let mut resolved = BTreeSet::new();
+        for path in &self.config.custom_paths {
+            resolved.insert(path.clone());
+        }
+        for template in self.active_custom_path_templates()? {
+            resolved.insert(resolve_custom_path_template(&template, home_root, xdg_root));
+        }
+        Ok(resolved.into_iter().collect())
+    }
+
+    pub fn add_active_custom_path_for_roots(
+        &mut self,
+        path: &Path,
+        home_root: &Path,
+        xdg_root: &Path,
+    ) -> Result<()> {
+        if !path.exists() {
+            anyhow::bail!("{} does not exist", path.display());
+        }
+        if !is_portable_custom_path(path, home_root, xdg_root) {
+            anyhow::bail!(
+                "{} is machine-specific. Track only paths under $HOME or $XDG_CONFIG_HOME.",
+                path.display()
+            );
+        }
+
+        if self.config.repo_root.is_none() {
+            if self.config.custom_paths.iter().any(|existing| existing == path) {
+                anyhow::bail!("{} is already being tracked", path.display());
+            }
+            self.config.custom_paths.push(path.to_path_buf());
+            self.config.custom_paths.sort();
+            return Ok(());
+        }
+
+        let template = portable_custom_path_template(path, home_root, xdg_root);
+        let mut templates = self.active_custom_path_templates()?;
+        if templates.iter().any(|existing| existing == &template)
+            || self
+                .config
+                .custom_paths
+                .iter()
+                .any(|existing| existing == path)
+        {
+            anyhow::bail!("{} is already being tracked", path.display());
+        }
+        templates.push(template);
+        templates.sort();
+        templates.dedup();
+        self.save_active_custom_path_templates(&templates)
+    }
+
+    pub fn active_custom_path_templates(&self) -> Result<Vec<String>> {
+        let Some(repo_root) = self.config.repo_root.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let path = profile_custom_paths_path(repo_root, self.active_profile());
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = fs::read_to_string(&path)?;
+        let file: ProfileCustomPathsFile =
+            toml::from_str(&content).context("Failed to parse custom-paths.toml")?;
+        Ok(file.paths)
+    }
+
+    fn save_active_custom_path_templates(&self, templates: &[String]) -> Result<()> {
+        let Some(repo_root) = self.config.repo_root.as_ref() else {
+            return Ok(());
+        };
+        let path = profile_custom_paths_path(repo_root, self.active_profile());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = ProfileCustomPathsFile {
+            paths: templates.to_vec(),
+        };
+        fs::write(path, toml::to_string_pretty(&file)?)?;
+        Ok(())
+    }
+
+    pub fn load_shared_links(&self) -> Result<SharedLinksFile> {
+        let Some(repo_root) = self.config.repo_root.as_ref() else {
+            return Ok(SharedLinksFile::default());
+        };
+        let path = shared_links_path(repo_root);
+        if !path.exists() {
+            return Ok(SharedLinksFile::default());
+        }
+        let content = fs::read_to_string(&path)?;
+        toml::from_str(&content).context("Failed to parse shared links manifest")
+    }
+
+    pub fn save_shared_links(&self, links: &SharedLinksFile) -> Result<()> {
+        let Some(repo_root) = self.config.repo_root.as_ref() else {
+            return Ok(());
+        };
+        let path = shared_links_path(repo_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, toml::to_string_pretty(links)?)?;
+        Ok(())
+    }
+}
+
+fn profile_custom_paths_path(repo_root: &Path, profile: &str) -> PathBuf {
+    repo_root
+        .join("profiles")
+        .join(profile)
+        .join(PROFILE_CUSTOM_PATHS_FILE)
+}
+
+pub fn shared_links_path(repo_root: &Path) -> PathBuf {
+    repo_root.join("shared").join(SHARED_LINKS_FILE)
+}
+
+pub fn portable_custom_path_template(path: &Path, home_root: &Path, xdg_root: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(xdg_root) {
+        return join_template("$XDG_CONFIG_HOME", relative);
+    }
+    if let Ok(relative) = path.strip_prefix(home_root) {
+        return join_template("$HOME", relative);
+    }
+    path.to_string_lossy().to_string()
+}
+
+pub fn resolve_custom_path_template(
+    template: &str,
+    home_root: &Path,
+    xdg_root: &Path,
+) -> PathBuf {
+    if template == "$XDG_CONFIG_HOME" {
+        return xdg_root.to_path_buf();
+    }
+    if let Some(relative) = template.strip_prefix("$XDG_CONFIG_HOME/") {
+        return xdg_root.join(relative);
+    }
+    if template == "$HOME" {
+        return home_root.to_path_buf();
+    }
+    if let Some(relative) = template.strip_prefix("$HOME/") {
+        return home_root.join(relative);
+    }
+    PathBuf::from(template)
+}
+
+fn join_template(prefix: &str, relative: &Path) -> String {
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    if relative.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/{relative}")
+    }
+}
+
+fn is_portable_custom_path(path: &Path, home_root: &Path, xdg_root: &Path) -> bool {
+    path.starts_with(xdg_root) || path.starts_with(home_root)
+}
+
+pub fn portable_entry_key(
+    origin: crate::model::OriginScope,
+    path: &Path,
+    home_root: &Path,
+    xdg_root: &Path,
+) -> Result<String> {
+    let key = match origin {
+        crate::model::OriginScope::Home => path.strip_prefix(home_root)?.to_path_buf(),
+        crate::model::OriginScope::XdgConfig => path.strip_prefix(xdg_root)?.to_path_buf(),
+        crate::model::OriginScope::Custom => {
+            let template = portable_custom_path_template(path, home_root, xdg_root);
+            PathBuf::from(template)
+        }
+    };
+    Ok(key.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -230,5 +433,101 @@ mod tests {
             .profiles
             .iter()
             .any(|profile| profile == "desktop-arch"));
+    }
+
+    #[test]
+    fn stores_custom_paths_in_profile_repo_file_with_portable_templates() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let home_root = temp.path().join("home");
+        let xdg_root = home_root.join(".config");
+        std::fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        std::fs::create_dir_all(xdg_root.join("waybar")).unwrap();
+        let custom_path = xdg_root.join("waybar/style.css");
+        std::fs::write(&custom_path, "body{}").unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root.clone()),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        state
+            .add_active_custom_path_for_roots(&custom_path, &home_root, &xdg_root)
+            .unwrap();
+
+        let manifest = std::fs::read_to_string(
+            repo_root.join("profiles/desktop-arch/custom-paths.toml"),
+        )
+        .unwrap();
+        assert!(manifest.contains("$XDG_CONFIG_HOME/waybar/style.css"));
+        assert!(state.config.custom_paths.is_empty());
+    }
+
+    #[test]
+    fn resolves_custom_paths_from_profile_repo_file() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let home_root = temp.path().join("home");
+        let xdg_root = home_root.join(".config");
+        std::fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        std::fs::write(
+            repo_root.join("profiles/desktop-arch/custom-paths.toml"),
+            "paths = [\"$HOME/.local/share/foo.json\", \"$XDG_CONFIG_HOME/waybar/style.css\"]\n",
+        )
+        .unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        let resolved = state
+            .resolve_active_custom_paths_for_roots(&home_root, &xdg_root)
+            .unwrap();
+        assert!(resolved
+            .iter()
+            .any(|path| path == &home_root.join(".local/share/foo.json")));
+        assert!(resolved
+            .iter()
+            .any(|path| path == &xdg_root.join("waybar/style.css")));
+    }
+
+    #[test]
+    fn rejects_machine_specific_custom_paths() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let home_root = temp.path().join("home");
+        let xdg_root = home_root.join(".config");
+        let machine_specific = temp.path().join("opt/tool/config.toml");
+        std::fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        std::fs::create_dir_all(machine_specific.parent().unwrap()).unwrap();
+        std::fs::write(&machine_specific, "enabled = true").unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![],
+        };
+
+        let error = state
+            .add_active_custom_path_for_roots(&machine_specific, &home_root, &xdg_root)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Track only paths under $HOME or $XDG_CONFIG_HOME"));
     }
 }

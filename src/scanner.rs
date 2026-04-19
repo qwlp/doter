@@ -1,5 +1,5 @@
 use crate::model::{DotfileEntry, EntryKind, ManagedState, OriginScope, ScanReport};
-use crate::state::PersistedState;
+use crate::state::{PersistedState, portable_entry_key};
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::fs;
@@ -73,22 +73,56 @@ pub fn scan_dotfiles_for_roots(
         }
     }
 
-    for path in &state.config.custom_paths {
-        if !path.exists() {
-            warnings.push(format!("{}: configured custom path does not exist", path.display()));
-            continue;
-        }
-        if !seen_paths.insert(path.clone()) {
-            continue;
-        }
-        match classify_entry_for_roots(state, path, OriginScope::Custom, home, xdg_config) {
-            Ok(entry) => {
-                if entry.managed_state == ManagedState::Conflicted {
-                    conflicts.push(entry.path.display().to_string());
-                }
-                entries.push(entry);
+    for path in state.resolve_active_custom_paths_for_roots(home, xdg_config)? {
+        if path.exists() {
+            if !seen_paths.insert(path.clone()) {
+                continue;
             }
-            Err(error) => warnings.push(format!("{}: {error}", path.display())),
+            match classify_entry_for_roots(state, &path, OriginScope::Custom, home, xdg_config) {
+                Ok(entry) => {
+                    if entry.managed_state == ManagedState::Conflicted {
+                        conflicts.push(entry.path.display().to_string());
+                    }
+                    entries.push(entry);
+                }
+                Err(error) => warnings.push(format!("{}: {error}", path.display())),
+            }
+            continue;
+        }
+
+        let shared_profiles = shared_profiles_for_entry(
+            state,
+            OriginScope::Custom,
+            &path,
+            home,
+            xdg_config,
+        )
+        .unwrap_or_default();
+        let expected_source = state.config.repo_root.as_ref().map(|repo_root| {
+            expected_managed_source(
+                repo_root,
+                state.active_profile(),
+                OriginScope::Custom,
+                &path,
+                home,
+                xdg_config,
+                &shared_profiles,
+            )
+        });
+        if let Some(expected_source) = expected_source.filter(|source| source.exists()) {
+            if !seen_paths.insert(path.clone()) {
+                continue;
+            }
+            entries.push(repo_only_entry(
+                state,
+                path,
+                expected_source,
+                OriginScope::Custom,
+                home,
+                xdg_config,
+            ));
+        } else {
+            warnings.push(format!("{}: configured custom path does not exist", path.display()));
         }
     }
 
@@ -116,6 +150,14 @@ pub fn scan_dotfiles_for_roots(
                 xdg_config,
             )?;
         }
+        collect_shared_profile_entries(
+            &mut entries,
+            &mut seen_paths,
+            state,
+            &active_profile,
+            home,
+            xdg_config,
+        )?;
     }
 
     entries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
@@ -163,11 +205,27 @@ fn classify_entry_for_roots(
     let id = stable_id(origin, path);
     let active_profile = state.active_profile();
     let record = state.find_record(active_profile, path);
+    let shared_profiles = state
+        .config
+        .repo_root
+        .as_ref()
+        .and_then(|_| shared_profiles_for_entry(state, origin, path, home, xdg_config).ok())
+        .unwrap_or_default();
     let expected_managed_source = state
         .config
         .repo_root
         .as_ref()
-        .map(|repo_root| expected_managed_source(repo_root, active_profile, origin, path, home, xdg_config));
+        .map(|repo_root| {
+            expected_managed_source(
+                repo_root,
+                active_profile,
+                origin,
+                path,
+                home,
+                xdg_config,
+                &shared_profiles,
+            )
+        });
     let symlink_target = if file_type.is_symlink() {
         fs::read_link(path).ok()
     } else {
@@ -182,7 +240,9 @@ fn classify_entry_for_roots(
             ManagedState::Conflicted
         }
     } else if let (Some(target), Some(repo_root)) = (&symlink_target, repo_root) {
-        if target.starts_with(repo_root.join("profiles").join(active_profile)) {
+        if target == expected_managed_source.as_ref().unwrap_or(target)
+            || target.starts_with(repo_root.join("profiles").join(active_profile))
+        {
             ManagedState::ManagedActive
         } else if expected_managed_source
             .as_ref()
@@ -245,6 +305,7 @@ fn classify_entry_for_roots(
         symlink_target,
         backup_path: record.and_then(|record| record.backup_path.clone()),
         warning,
+        shared_profiles,
     })
 }
 
@@ -255,7 +316,11 @@ fn expected_managed_source(
     active_path: &Path,
     home: &Path,
     xdg_config: &Path,
+    shared_profiles: &[String],
 ) -> PathBuf {
+    if shared_profiles.iter().any(|linked| linked == profile) {
+        return shared_managed_source(repo_root, origin, active_path, home, xdg_config);
+    }
     match origin {
         OriginScope::Home => repo_root
             .join("profiles")
@@ -271,18 +336,62 @@ fn expected_managed_source(
             .join("profiles")
             .join(profile)
             .join("custom")
-            .join(custom_relative_path(active_path)),
+            .join(custom_relative_path(active_path, home, xdg_config)),
     }
 }
 
-fn custom_relative_path(active_path: &Path) -> PathBuf {
-    let mut relative = PathBuf::new();
-    if active_path.is_absolute() {
-        relative.push("absolute");
-    } else {
-        relative.push("relative");
+fn shared_managed_source(
+    repo_root: &Path,
+    origin: OriginScope,
+    active_path: &Path,
+    home: &Path,
+    xdg_config: &Path,
+) -> PathBuf {
+    match origin {
+        OriginScope::Home => repo_root
+            .join("shared")
+            .join("home")
+            .join(active_path.strip_prefix(home).unwrap_or(active_path)),
+        OriginScope::XdgConfig => repo_root
+            .join("shared")
+            .join("config")
+            .join(active_path.strip_prefix(xdg_config).unwrap_or(active_path)),
+        OriginScope::Custom => repo_root
+            .join("shared")
+            .join("custom")
+            .join(custom_relative_path(active_path, home, xdg_config)),
+    }
+}
+
+fn shared_profiles_for_entry(
+    state: &PersistedState,
+    origin: OriginScope,
+    path: &Path,
+    home: &Path,
+    xdg_config: &Path,
+) -> Result<Vec<String>> {
+    let key = portable_entry_key(origin, path, home, xdg_config)?;
+    let links = state.load_shared_links()?;
+    Ok(links
+        .entries
+        .into_iter()
+        .find(|entry| entry.origin == origin && entry.key == key)
+        .map(|entry| entry.profiles)
+        .unwrap_or_default())
+}
+
+fn custom_relative_path(active_path: &Path, home: &Path, xdg_config: &Path) -> PathBuf {
+    if let Ok(relative) = active_path.strip_prefix(xdg_config) {
+        return PathBuf::from("config").join(relative);
+    }
+    if let Ok(relative) = active_path.strip_prefix(home) {
+        return PathBuf::from("home").join(relative);
+    }
+    if !active_path.is_absolute() {
+        return PathBuf::from("relative").join(active_path);
     }
 
+    let mut relative = PathBuf::from("absolute");
     for component in active_path.components() {
         use std::path::Component;
         match component {
@@ -292,7 +401,6 @@ fn custom_relative_path(active_path: &Path) -> PathBuf {
             Component::Normal(part) => relative.push(part),
         }
     }
-
     relative
 }
 
@@ -320,7 +428,14 @@ fn collect_repo_profile_entries(
         if !seen_paths.insert(live_path.clone()) {
             continue;
         }
-        entries.push(repo_only_entry(state, live_path, managed_source, origin));
+        entries.push(repo_only_entry(
+            state,
+            live_path,
+            managed_source,
+            origin,
+            home,
+            xdg_config,
+        ));
     }
     Ok(())
 }
@@ -330,7 +445,11 @@ fn repo_only_entry(
     live_path: PathBuf,
     managed_source: PathBuf,
     origin: OriginScope,
+    home: &Path,
+    xdg_config: &Path,
 ) -> DotfileEntry {
+    let shared_profiles =
+        shared_profiles_for_entry(state, origin, &live_path, home, xdg_config).unwrap_or_default();
     let kind = fs::symlink_metadata(&managed_source)
         .map(|metadata| {
             let file_type = metadata.file_type();
@@ -364,7 +483,52 @@ fn repo_only_entry(
         symlink_target: None,
         backup_path,
         warning: None,
+        shared_profiles,
     }
+}
+
+fn collect_shared_profile_entries(
+    entries: &mut Vec<DotfileEntry>,
+    seen_paths: &mut BTreeSet<PathBuf>,
+    state: &PersistedState,
+    active_profile: &str,
+    home: &Path,
+    xdg_config: &Path,
+) -> Result<()> {
+    let repo_root = state
+        .config
+        .repo_root
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Repository not configured"))?;
+    let links = state.load_shared_links()?;
+    for link in links.entries {
+        if !link.profiles.iter().any(|profile| profile == active_profile) {
+            continue;
+        }
+        let live_path = match link.origin {
+            OriginScope::Home => home.join(&link.key),
+            OriginScope::XdgConfig => xdg_config.join(&link.key),
+            OriginScope::Custom => {
+                crate::state::resolve_custom_path_template(&link.key, home, xdg_config)
+            }
+        };
+        if !seen_paths.insert(live_path.clone()) {
+            continue;
+        }
+        let managed_source =
+            shared_managed_source(repo_root, link.origin, &live_path, home, xdg_config);
+        if managed_source.exists() {
+            entries.push(repo_only_entry(
+                state,
+                live_path,
+                managed_source,
+                link.origin,
+                home,
+                xdg_config,
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn stable_id(origin: OriginScope, path: &Path) -> String {
@@ -486,6 +650,148 @@ mod tests {
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].origin, OriginScope::Custom);
         assert_eq!(report.entries[0].path, custom_file);
+    }
+
+    #[test]
+    fn scans_repo_defined_custom_paths() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        let custom_file = xdg.join("waybar/style.css");
+        fs::create_dir_all(custom_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&custom_file, "* { color: white; }").unwrap();
+        fs::write(
+            repo_root.join("profiles/desktop-arch/custom-paths.toml"),
+            "paths = [\"$XDG_CONFIG_HOME/waybar/style.css\"]\n",
+        )
+        .unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                include_xdg_config: false,
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let report = scan_dotfiles_for_roots(&state, &home, &xdg).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].origin, OriginScope::Custom);
+        assert_eq!(report.entries[0].path, custom_file);
+    }
+
+    #[test]
+    fn includes_repo_defined_custom_paths_missing_from_live_path_as_inactive() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        let managed_source = repo_root.join("profiles/desktop-arch/custom/config/waybar/style.css");
+        fs::create_dir_all(managed_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(repo_root.join("profiles/desktop-arch")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&managed_source, "* { color: white; }").unwrap();
+        fs::write(
+            repo_root.join("profiles/desktop-arch/custom-paths.toml"),
+            "paths = [\"$XDG_CONFIG_HOME/waybar/style.css\"]\n",
+        )
+        .unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let report = scan_dotfiles_for_roots(&state, &home, &xdg).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].origin, OriginScope::Custom);
+        assert_eq!(
+            report.entries[0].path,
+            xdg.join("waybar/style.css")
+        );
+        assert_eq!(report.entries[0].managed_state, ManagedState::ManagedInactive);
+    }
+
+    #[test]
+    fn detects_active_shared_symlink() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        let shared_source = repo_root.join("shared/config/nvim");
+        fs::create_dir_all(shared_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(repo_root.join("shared")).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&shared_source, "set number").unwrap();
+        fs::write(
+            repo_root.join("shared/links.toml"),
+            "[[entries]]\norigin = \"XdgConfig\"\nkey = \"nvim\"\nprofiles = [\"desktop-arch\", \"laptop\"]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&shared_source, xdg.join("nvim")).unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string(), "laptop".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let entry = classify_entry_for_roots(&state, &xdg.join("nvim"), OriginScope::XdgConfig, &home, &xdg)
+            .unwrap();
+        assert_eq!(entry.managed_state, ManagedState::ManagedActive);
+        assert_eq!(entry.shared_profiles, vec!["desktop-arch".to_string(), "laptop".to_string()]);
+    }
+
+    #[test]
+    fn includes_shared_entries_missing_from_live_path_as_inactive() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        let shared_source = repo_root.join("shared/config/nvim");
+        fs::create_dir_all(shared_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(repo_root.join("shared")).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&shared_source, "set number").unwrap();
+        fs::write(
+            repo_root.join("shared/links.toml"),
+            "[[entries]]\norigin = \"XdgConfig\"\nkey = \"nvim\"\nprofiles = [\"desktop-arch\", \"laptop\"]\n",
+        )
+        .unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string(), "laptop".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                include_xdg_config: false,
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let report = scan_dotfiles_for_roots(&state, &home, &xdg).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].display_name, "nvim");
+        assert_eq!(report.entries[0].managed_state, ManagedState::ManagedInactive);
+        assert_eq!(report.entries[0].shared_profiles, vec!["desktop-arch".to_string(), "laptop".to_string()]);
     }
 
     #[test]

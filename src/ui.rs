@@ -1,5 +1,5 @@
 use crate::git;
-use crate::model::{DotfileEntry, EntryKind, GitRepoState, ManagedState, ScanReport};
+use crate::model::{DotfileEntry, EntryKind, GitRepoState, ManagedState, OriginScope, ScanReport};
 use crate::operations;
 use crate::scanner;
 use crate::state::{AppPaths, PersistedState};
@@ -9,10 +9,10 @@ use glib::translate::IntoGlib;
 use glib::ControlFlow;
 use gtk4::prelude::*;
 use gtk4::{
-    gdk, pango, Align, Application, ApplicationWindow, Box as GtkBox, Button, ComboBoxText, Dialog,
-    Entry, FileChooserAction, FileChooserNative, FlowBox, FlowBoxChild, Grid, Image, Label,
-    ListBox, ListBoxRow, Orientation, Paned, PolicyType, ResponseType, Revealer, ScrolledWindow,
-    SearchEntry, SelectionMode, Stack, StackSwitcher, TextTag, TextView,
+    gdk, pango, Align, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton,
+    ComboBoxText, Dialog, Entry, FileChooserAction, FileChooserNative, FlowBox, FlowBoxChild,
+    Grid, Image, Label, ListBox, ListBoxRow, Orientation, Paned, PolicyType, ResponseType,
+    Revealer, ScrolledWindow, SearchEntry, SelectionMode, Stack, StackSwitcher, TextTag, TextView,
 };
 use similar::{ChangeTag, TextDiff};
 use std::cell::RefCell;
@@ -36,7 +36,8 @@ struct Widgets {
     new_profile_button: Button,
     track_path_button: Button,
     apply_profile_button: Button,
-    copy_profile_button: Button,
+    migrate_shared_button: Button,
+    copy_from_button: Button,
     remove_profile_button: Button,
     open_repo_root_button: Button,
     settings_button: Button,
@@ -72,6 +73,8 @@ struct Widgets {
     diff_current_view: TextView,
     enable_button: Button,
     disable_button: Button,
+    share_button: Button,
+    sync_profiles_button: Button,
     stage_button: Button,
     auto_commit_button: Button,
     commit_button: Button,
@@ -252,7 +255,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let new_profile_button = icon_button("list-add-symbolic", "New");
     let track_path_button = icon_button("document-open-symbolic", "Track Path");
     let apply_profile_button = icon_button("emblem-ok-symbolic", "Apply");
-    let copy_profile_button = icon_button("edit-copy-symbolic", "Copy");
+    let migrate_shared_button = icon_button("emblem-shared-symbolic", "Migrate Shared");
+    let copy_from_button = icon_button("edit-copy-symbolic", "Copy From");
     let remove_profile_button = icon_button("user-trash-symbolic", "Remove");
     let open_repo_root_button = icon_button("folder-open-symbolic", "Open Repo");
     let settings_button = icon_button("emblem-system-symbolic", "Settings");
@@ -265,9 +269,10 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     filter_grid.attach(&new_profile_button, 3, 1, 1, 1);
     filter_grid.attach(&track_path_button, 0, 2, 1, 1);
     filter_grid.attach(&apply_profile_button, 1, 2, 1, 1);
-    filter_grid.attach(&copy_profile_button, 2, 2, 1, 1);
+    filter_grid.attach(&copy_from_button, 2, 2, 1, 1);
     filter_grid.attach(&remove_profile_button, 3, 2, 1, 1);
-    filter_grid.attach(&open_repo_root_button, 0, 3, 2, 1);
+    filter_grid.attach(&open_repo_root_button, 0, 3, 1, 1);
+    filter_grid.attach(&migrate_shared_button, 1, 3, 1, 1);
     filter_grid.attach(&settings_button, 2, 3, 2, 1);
 
     let filter_controls = Grid::new();
@@ -373,6 +378,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     actions_content.add_css_class("section-content");
     let enable_button = icon_button("emblem-ok-symbolic", "Enable");
     let disable_button = icon_button("action-unavailable-symbolic", "Disable");
+    let share_button = icon_button("emblem-shared-symbolic", "Shared");
+    let sync_profiles_button = icon_button("view-refresh-symbolic", "Sync Profiles");
     let open_live_button = icon_button("folder-open-symbolic", "Open Live");
     let open_repo_button = icon_button("text-x-generic-symbolic", "Open Repo");
     let reveal_button = icon_button("folder-visiting-symbolic", "Reveal");
@@ -385,6 +392,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     for button in [
         &enable_button,
         &disable_button,
+        &share_button,
+        &sync_profiles_button,
         &open_live_button,
         &open_repo_button,
         &reveal_button,
@@ -408,15 +417,17 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     actions_content.set_column_spacing(10);
     actions_content.attach(&enable_button, 0, 0, 1, 1);
     actions_content.attach(&disable_button, 1, 0, 1, 1);
-    actions_content.attach(&open_live_button, 2, 0, 1, 1);
-    actions_content.attach(&open_repo_button, 3, 0, 1, 1);
-    actions_content.attach(&reveal_button, 4, 0, 1, 1);
-    actions_content.attach(&stage_button, 0, 1, 1, 1);
-    actions_content.attach(&auto_commit_button, 1, 1, 1, 1);
-    actions_content.attach(&commit_button, 2, 1, 1, 1);
-    actions_content.attach(&push_button, 3, 1, 1, 1);
-    actions_content.attach(&sync_button, 4, 1, 1, 1);
-    actions_content.attach(&stage_all_button, 0, 2, 2, 1);
+    actions_content.attach(&share_button, 2, 0, 1, 1);
+    actions_content.attach(&sync_profiles_button, 3, 0, 1, 1);
+    actions_content.attach(&open_live_button, 4, 0, 1, 1);
+    actions_content.attach(&open_repo_button, 0, 1, 1, 1);
+    actions_content.attach(&reveal_button, 1, 1, 1, 1);
+    actions_content.attach(&stage_button, 2, 1, 1, 1);
+    actions_content.attach(&auto_commit_button, 3, 1, 1, 1);
+    actions_content.attach(&commit_button, 4, 1, 1, 1);
+    actions_content.attach(&push_button, 0, 2, 1, 1);
+    actions_content.attach(&sync_button, 1, 2, 1, 1);
+    actions_content.attach(&stage_all_button, 2, 2, 2, 1);
     overview_section.append(&overview_card);
     overview_section.append(&actions_content);
 
@@ -663,7 +674,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         new_profile_button,
         track_path_button,
         apply_profile_button,
-        copy_profile_button,
+        migrate_shared_button,
+        copy_from_button,
         remove_profile_button,
         open_repo_root_button,
         stage_all_button,
@@ -698,6 +710,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         diff_current_view,
         enable_button,
         disable_button,
+        share_button,
+        sync_profiles_button,
         stage_button,
         auto_commit_button,
         commit_button,
@@ -933,9 +947,17 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
     bind_button(
         runtime.clone(),
         |runtime| {
-            prompt_copy_profile(runtime);
+            prompt_migrate_shared_entries(runtime);
         },
-        |widgets| widgets.copy_profile_button.clone(),
+        |widgets| widgets.migrate_shared_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
+            prompt_copy_from_profile(runtime);
+        },
+        |widgets| widgets.copy_from_button.clone(),
     );
 
     bind_button(
@@ -984,6 +1006,22 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             disable_selected(runtime);
         },
         |widgets| widgets.disable_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
+            prompt_share_selected_entry(runtime);
+        },
+        |widgets| widgets.share_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
+            prompt_sync_selected_entry_profiles(runtime);
+        },
+        |widgets| widgets.sync_profiles_button.clone(),
     );
 
     bind_button(
@@ -1444,7 +1482,7 @@ fn refresh(runtime: Rc<RefCell<AppRuntime>>) {
 }
 
 fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
-    let (list_box, grid_box, summary_label, apply_profile_button, entries, summary_text, selected_entry_id, apply_preview) = {
+    let (list_box, grid_box, summary_label, apply_profile_button, migrate_shared_button, entries, summary_text, selected_entry_id, apply_preview, can_migrate_shared) = {
         let guard = runtime.borrow();
         let entries = browser_entries(
             &guard.report,
@@ -1493,10 +1531,12 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
             guard.widgets.grid_box.clone(),
             guard.widgets.summary_label.clone(),
             guard.widgets.apply_profile_button.clone(),
+            guard.widgets.migrate_shared_button.clone(),
             entries,
             summary_text,
             guard.selected_entry_id.clone(),
             operations::preview_apply_entries(&guard.report.entries),
+            guard.persisted.config.repo_root.is_some() && guard.persisted.config.profiles.len() > 1,
         )
     };
 
@@ -1509,6 +1549,7 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
 
     summary_label.set_label(&summary_text);
     apply_profile_button.set_sensitive(apply_preview.inactive_entries > 0);
+    migrate_shared_button.set_sensitive(can_migrate_shared);
 
     runtime.borrow_mut().browser_selection_updating = true;
     let mut row_to_select: Option<ListBoxRow> = None;
@@ -2948,7 +2989,7 @@ fn effective_entry_kind(entry: &DotfileEntry) -> EntryKind {
 
 fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
     let selected = selected_entry(runtime);
-    let (widgets, repo_root, current_branch, remote_details, staged, unstaged, untracked, dirty) = {
+    let (widgets, repo_root, current_branch, remote_details, staged, unstaged, untracked, dirty, profile_count) = {
         let guard = runtime.borrow();
         (
             guard.widgets.clone(),
@@ -2959,16 +3000,22 @@ fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
             guard.git_state.unstaged_files.len(),
             guard.git_state.untracked_files.len(),
             guard.git_state.is_dirty(),
+            guard.persisted.config.profiles.len(),
         )
     };
 
     match selected {
         Some(entry) => {
             widgets.entry_title_label.set_label(&format!(
-                "{}  •  {}  •  {}",
+                "{}  •  {}  •  {}{}",
                 entry.display_name,
                 entry.status_label(),
                 entry_browser_subtitle(&entry),
+                if entry.shared_profiles.is_empty() {
+                    String::new()
+                } else {
+                    format!("  •  Shared {}", entry.shared_profiles.join(", "))
+                },
             ));
             widgets
                 .path_value_label
@@ -3008,6 +3055,16 @@ fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
             widgets
                 .disable_button
                 .set_sensitive(entry.managed_state == ManagedState::ManagedActive);
+            widgets.share_button.set_sensitive(
+                entry.managed_source.is_some()
+                    && entry.managed_state != ManagedState::Conflicted
+                    && profile_count > 1,
+            );
+            widgets.sync_profiles_button.set_sensitive(
+                entry.managed_source.is_some()
+                    && entry.managed_state != ManagedState::Conflicted
+                    && profile_count > 1,
+            );
             widgets
                 .stage_button
                 .set_sensitive(entry.managed_source.is_some());
@@ -3057,6 +3114,8 @@ fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
                 });
             widgets.enable_button.set_sensitive(false);
             widgets.disable_button.set_sensitive(false);
+            widgets.share_button.set_sensitive(false);
+            widgets.sync_profiles_button.set_sensitive(false);
             widgets.stage_button.set_sensitive(false);
             widgets.ignore_repo_button.set_sensitive(false);
             widgets.auto_commit_button.set_sensitive(false);
@@ -3170,6 +3229,605 @@ fn maybe_prompt_apply_profile(runtime: &Rc<RefCell<AppRuntime>>) {
     let (_, _, preview, active_entries) = apply_profile_candidates(runtime);
     if preview.inactive_entries > 0 && active_entries == 0 {
         prompt_apply_active_profile(runtime.clone(), true);
+    }
+}
+
+fn prompt_migrate_shared_entries(runtime: Rc<RefCell<AppRuntime>>) {
+    let preview = {
+        let guard = runtime.borrow();
+        operations::preview_shared_migration(&guard.persisted)
+    };
+    let preview = match preview {
+        Ok(preview) => preview,
+        Err(error) => {
+            show_message(
+                &runtime.borrow().widgets.window,
+                "Shared migration failed",
+                &error.to_string(),
+            );
+            return;
+        }
+    };
+
+    if preview.candidates.is_empty() {
+        let mut body =
+            "Doter did not find any identical profile entries that are safe to migrate into the shared layer right now."
+                .to_string();
+        if !preview.divergent_entries.is_empty() {
+            body.push_str(&format!(
+                "\n\nEntries that exist in multiple profiles but already diverged: {}",
+                preview.divergent_entries.join(", ")
+            ));
+        }
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Nothing to migrate",
+            &body,
+        );
+        return;
+    }
+
+    let widgets = runtime.borrow().widgets.clone();
+    let dialog = Dialog::builder()
+        .title("Migrate identical entries to shared")
+        .transient_for(&widgets.window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Migrate", ResponseType::Accept);
+
+    let box_ = dialog_content_box(&dialog);
+    let mut body = format!(
+        "Doter found {} identical dotfile{} across your profiles. Select the ones that should move into the repo's shared/ layer and manifest.",
+        preview.candidates.len(),
+        if preview.candidates.len() == 1 { "" } else { "s" }
+    );
+    if !preview.divergent_entries.is_empty() {
+        body.push_str(&format!(
+            "\n\nLeft profile-specific because they already differ: {}",
+            preview.divergent_entries.join(", ")
+        ));
+    }
+    if !preview.already_shared_entries.is_empty() {
+        body.push_str(&format!(
+            "\n\nAlready governed by shared/links.toml: {}",
+            preview.already_shared_entries.join(", ")
+        ));
+    }
+    let description = Label::new(Some(&body));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    box_.append(&description);
+
+    let mut candidate_checks = Vec::new();
+    for candidate in &preview.candidates {
+        let check = CheckButton::with_label(&format!(
+            "{}  •  {}  •  {}",
+            candidate.display_name,
+            shared_origin_label(candidate.origin),
+            candidate.profiles.join(", ")
+        ));
+        check.set_halign(Align::Start);
+        check.set_active(true);
+        box_.append(&check);
+        candidate_checks.push((candidate.clone(), check));
+    }
+
+    {
+        let runtime = runtime.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response != ResponseType::Accept {
+                dialog.close();
+                return;
+            }
+
+            let selected = candidate_checks
+                .iter()
+                .filter(|(_, check)| check.is_active())
+                .map(|(candidate, _)| candidate.clone())
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                show_message(
+                    &runtime.borrow().widgets.window,
+                    "Choose entries",
+                    "Select at least one safe shared candidate to migrate.",
+                );
+                return;
+            }
+
+            if !confirm_action(
+                &runtime.borrow().widgets.window,
+                "Migrate to shared layer",
+                &format!(
+                    "Migrate {} selected dotfile{} into the shared layer now? Doter will create shared repo copies, update shared/links.toml, and relink this machine where the active profile still points at profile-specific sources.",
+                    selected.len(),
+                    if selected.len() == 1 { "" } else { "s" }
+                ),
+            ) {
+                return;
+            }
+
+            dialog.close();
+            run_shared_migration(runtime.clone(), selected);
+        });
+    }
+
+    dialog.present();
+}
+
+fn run_shared_migration(
+    runtime: Rc<RefCell<AppRuntime>>,
+    candidates: Vec<operations::SharedMigrationCandidate>,
+) {
+    let result = {
+        let mut guard = runtime.borrow_mut();
+        let paths = guard.paths.clone();
+        let result = operations::migrate_entries_to_shared(&mut guard.persisted, &candidates);
+        if result.is_ok() {
+            let _ = guard.persisted.save(&paths);
+        }
+        result
+    };
+
+    match result {
+        Ok(result) => {
+            let widgets = runtime.borrow().widgets.clone();
+            present_sync_notice(&widgets, "Shared migration complete", &result.message, false);
+            refresh(runtime);
+        }
+        Err(error) => show_message(
+            &runtime.borrow().widgets.window,
+            "Shared migration failed",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn shared_origin_label(origin: OriginScope) -> &'static str {
+    match origin {
+        OriginScope::Home => "Home",
+        OriginScope::XdgConfig => "Config",
+        OriginScope::Custom => "Custom",
+    }
+}
+
+fn prompt_share_selected_entry(runtime: Rc<RefCell<AppRuntime>>) {
+    let Some(entry) = selected_entry(&runtime) else {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "No selection",
+            "Select a managed dotfile first, then choose which profiles should share it.",
+        );
+        return;
+    };
+    if entry.managed_state == ManagedState::Conflicted {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Resolve conflict first",
+            "This dotfile is in a conflicted state. Repair it before moving it into the shared layer.",
+        );
+        return;
+    }
+    if entry.managed_source.is_none() {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Not managed",
+            "This dotfile is not managed in the active profile yet.",
+        );
+        return;
+    }
+
+    let widgets = runtime.borrow().widgets.clone();
+    let active_profile = runtime.borrow().persisted.config.active_profile.clone();
+    let profiles = runtime
+        .borrow()
+        .persisted
+        .config
+        .profiles
+        .clone();
+    let dialog = Dialog::builder()
+        .title("Shared entry settings")
+        .transient_for(&widgets.window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Save", ResponseType::Accept);
+
+    let box_ = dialog_content_box(&dialog);
+    let description = Label::new(Some(&format!(
+        "Choose which profiles should use one shared source for '{}'. Doter stores these links in shared/links.toml and keeps the shared repo copy under shared/.",
+        entry.display_name
+    )));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    box_.append(&description);
+
+    let mut profile_checks = Vec::new();
+    for profile in profiles {
+        let check = CheckButton::with_label(&profile);
+        check.set_halign(Align::Start);
+        if entry.shared_profiles.iter().any(|linked| linked == &profile) || profile == active_profile
+        {
+            check.set_active(true);
+        }
+        box_.append(&check);
+        profile_checks.push((profile, check));
+    }
+
+    {
+        let runtime = runtime.clone();
+        let entry = entry.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response != ResponseType::Accept {
+                dialog.close();
+                return;
+            }
+
+            let target_profiles = profile_checks
+                .iter()
+                .filter(|(_, check)| check.is_active())
+                .map(|(profile, _)| profile.clone())
+                .collect::<Vec<_>>();
+            if target_profiles.len() < 2 {
+                show_message(
+                    &runtime.borrow().widgets.window,
+                    "Choose profiles",
+                    "Select at least two profiles. Use Copy From or Sync Profiles if you only want a one-off copy instead of a shared connection.",
+                );
+                return;
+            }
+
+            let preview = {
+                let guard = runtime.borrow();
+                operations::preview_share_entry(&guard.persisted, &entry, &target_profiles)
+            };
+            let preview = match preview {
+                Ok(preview) => preview,
+                Err(error) => {
+                    show_message(
+                        &runtime.borrow().widgets.window,
+                        "Share preview failed",
+                        &error.to_string(),
+                    );
+                    return;
+                }
+            };
+
+            let mode = if preview.conflict_paths.is_empty() {
+                if !confirm_action(
+                    &runtime.borrow().widgets.window,
+                    "Save shared settings",
+                    &format!(
+                        "Link '{}' across {} profiles? Doter will create or update the shared repo copy and write the shared manifest entry for it.",
+                        entry.display_name,
+                        preview.target_profiles.len()
+                    ),
+                ) {
+                    return;
+                }
+                operations::ProfileCopyMode::KeepExisting
+            } else {
+                let Some(mode) = present_shared_entry_conflict_dialog(
+                    &runtime.borrow().widgets.window,
+                    &entry.display_name,
+                    &preview.target_profiles,
+                    &preview.conflict_paths,
+                ) else {
+                    return;
+                };
+                mode
+            };
+
+            dialog.close();
+            run_share_selected_entry(runtime.clone(), entry.clone(), target_profiles, mode);
+        });
+    }
+
+    dialog.present();
+}
+
+fn present_shared_entry_conflict_dialog(
+    window: &ApplicationWindow,
+    entry_name: &str,
+    target_profiles: &[String],
+    conflict_paths: &[PathBuf],
+) -> Option<operations::ProfileCopyMode> {
+    let dialog = Dialog::builder()
+        .title("Shared layer already has content")
+        .transient_for(window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Keep Existing", ResponseType::Reject);
+    dialog.add_button("Overwrite Existing", ResponseType::Accept);
+    let box_ = dialog_content_box(&dialog);
+    let preview_lines = conflict_paths
+        .iter()
+        .take(8)
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>();
+    let mut body = format!(
+        "Sharing '{}' across {} profiles would touch {} existing shared path(s).\n\nKeep Existing: keep the current shared copy and only update the profile links.\nOverwrite Existing: replace the shared copy with the current profile's content.",
+        entry_name,
+        target_profiles.len(),
+        conflict_paths.len()
+    );
+    if !preview_lines.is_empty() {
+        body.push_str("\n\nExamples:\n");
+        body.push_str(&preview_lines.join("\n"));
+    }
+    let label = Label::new(Some(&body));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    box_.append(&label);
+    let response = glib::MainContext::default().block_on(dialog.run_future());
+    dialog.close();
+    match response {
+        ResponseType::Accept => Some(operations::ProfileCopyMode::OverwriteExisting),
+        ResponseType::Reject => Some(operations::ProfileCopyMode::KeepExisting),
+        _ => None,
+    }
+}
+
+fn run_share_selected_entry(
+    runtime: Rc<RefCell<AppRuntime>>,
+    entry: DotfileEntry,
+    target_profiles: Vec<String>,
+    mode: operations::ProfileCopyMode,
+) {
+    let result = {
+        let mut guard = runtime.borrow_mut();
+        let paths = guard.paths.clone();
+        let result =
+            operations::share_entry_with_profiles(&mut guard.persisted, &entry, &target_profiles, mode);
+        if result.is_ok() {
+            let _ = guard.persisted.save(&paths);
+        }
+        result
+    };
+
+    match result {
+        Ok(result) => {
+            let widgets = runtime.borrow().widgets.clone();
+            present_sync_notice(&widgets, "Dotfile shared", &result.message, false);
+            refresh(runtime);
+        }
+        Err(error) => show_message(
+            &runtime.borrow().widgets.window,
+            "Share failed",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn prompt_sync_selected_entry_profiles(runtime: Rc<RefCell<AppRuntime>>) {
+    let Some(entry) = selected_entry(&runtime) else {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "No selection",
+            "Select a managed dotfile first, then choose which other profiles should receive it.",
+        );
+        return;
+    };
+    if entry.managed_state == ManagedState::Conflicted {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Resolve conflict first",
+            "This dotfile is in a conflicted state. Repair it before syncing it to other profiles.",
+        );
+        return;
+    }
+    if entry.managed_source.is_none() {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Not managed",
+            "This dotfile is not managed in the active profile yet.",
+        );
+        return;
+    }
+
+    let widgets = runtime.borrow().widgets.clone();
+    let active_profile = runtime.borrow().persisted.config.active_profile.clone();
+    let profiles = runtime
+        .borrow()
+        .persisted
+        .config
+        .profiles
+        .iter()
+        .filter(|profile| *profile != &active_profile)
+        .cloned()
+        .collect::<Vec<_>>();
+    if profiles.is_empty() {
+        show_message(
+            &widgets.window,
+            "Not enough profiles",
+            "Create another profile first, then you can sync this dotfile into it.",
+        );
+        return;
+    }
+
+    let dialog = Dialog::builder()
+        .title("Sync dotfile to profiles")
+        .transient_for(&widgets.window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Continue", ResponseType::Accept);
+
+    let box_ = dialog_content_box(&dialog);
+    let description = Label::new(Some(&format!(
+        "Sync '{}' from profile '{}' into other profiles. Choose only the profiles that should share this dotfile. If a selected profile already has its own repo copy, you will choose whether to keep it or overwrite it before anything changes.",
+        entry.display_name, active_profile
+    )));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    box_.append(&description);
+
+    let mut profile_checks = Vec::new();
+    for profile in profiles {
+        let check = CheckButton::with_label(&profile);
+        check.set_halign(Align::Start);
+        box_.append(&check);
+        profile_checks.push((profile, check));
+    }
+
+    {
+        let runtime = runtime.clone();
+        let entry = entry.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response != ResponseType::Accept {
+                dialog.close();
+                return;
+            }
+
+            let destination_profiles = profile_checks
+                .iter()
+                .filter(|(_, check)| check.is_active())
+                .map(|(profile, _)| profile.clone())
+                .collect::<Vec<_>>();
+            if destination_profiles.is_empty() {
+                show_message(
+                    &runtime.borrow().widgets.window,
+                    "Choose profiles",
+                    "Select at least one destination profile.",
+                );
+                return;
+            }
+
+            let preview = {
+                let guard = runtime.borrow();
+                operations::preview_entry_profile_sync(&guard.persisted, &entry, &destination_profiles)
+            };
+            let preview = match preview {
+                Ok(preview) => preview,
+                Err(error) => {
+                    show_message(
+                        &runtime.borrow().widgets.window,
+                        "Sync preview failed",
+                        &error.to_string(),
+                    );
+                    return;
+                }
+            };
+
+            let mode = if preview.conflict_paths.is_empty() {
+                let confirm = confirm_action(
+                    &runtime.borrow().widgets.window,
+                    "Sync dotfile",
+                    &format!(
+                        "Sync '{}' into {} selected profile(s)? No existing destination repo paths will be overwritten.",
+                        entry.display_name,
+                        preview.destination_profiles
+                    ),
+                );
+                if !confirm {
+                    return;
+                }
+                operations::ProfileCopyMode::KeepExisting
+            } else {
+                let Some(mode) = present_entry_profile_sync_conflict_dialog(
+                    &runtime.borrow().widgets.window,
+                    &entry.display_name,
+                    &destination_profiles,
+                    &preview.conflict_profiles,
+                    &preview.conflict_paths,
+                ) else {
+                    return;
+                };
+                mode
+            };
+
+            dialog.close();
+            run_entry_profile_sync(runtime.clone(), entry.clone(), destination_profiles, mode);
+        });
+    }
+
+    dialog.present();
+}
+
+fn present_entry_profile_sync_conflict_dialog(
+    window: &ApplicationWindow,
+    entry_name: &str,
+    destination_profiles: &[String],
+    conflict_profiles: &[String],
+    conflict_paths: &[PathBuf],
+) -> Option<operations::ProfileCopyMode> {
+    let dialog = Dialog::builder()
+        .title("Destination profiles already have this dotfile")
+        .transient_for(window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Keep Existing", ResponseType::Reject);
+    dialog.add_button("Overwrite Existing", ResponseType::Accept);
+
+    let box_ = dialog_content_box(&dialog);
+    let mut body = format!(
+        "Syncing '{}' into {} selected profile(s) would touch {} existing destination path(s) across {} profile(s).\n\nKeep Existing: skip those destination paths and leave each profile's current copy as-is.\nOverwrite Existing: replace those destination paths with the source profile copy.",
+        entry_name,
+        destination_profiles.len(),
+        conflict_paths.len(),
+        conflict_profiles.len()
+    );
+    if !conflict_profiles.is_empty() {
+        body.push_str(&format!(
+            "\n\nProfiles with existing copies: {}",
+            conflict_profiles.join(", ")
+        ));
+    }
+
+    let preview_lines = conflict_paths
+        .iter()
+        .take(8)
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>();
+    if !preview_lines.is_empty() {
+        body.push_str("\n\nExamples:\n");
+        body.push_str(&preview_lines.join("\n"));
+        if conflict_paths.len() > preview_lines.len() {
+            body.push_str(&format!(
+                "\n... and {} more",
+                conflict_paths.len() - preview_lines.len()
+            ));
+        }
+    }
+
+    let label = Label::new(Some(&body));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    box_.append(&label);
+
+    let response = glib::MainContext::default().block_on(dialog.run_future());
+    dialog.close();
+    match response {
+        ResponseType::Accept => Some(operations::ProfileCopyMode::OverwriteExisting),
+        ResponseType::Reject => Some(operations::ProfileCopyMode::KeepExisting),
+        _ => None,
+    }
+}
+
+fn run_entry_profile_sync(
+    runtime: Rc<RefCell<AppRuntime>>,
+    entry: DotfileEntry,
+    destination_profiles: Vec<String>,
+    mode: operations::ProfileCopyMode,
+) {
+    let result = {
+        let mut guard = runtime.borrow_mut();
+        operations::sync_entry_to_profiles(&mut guard.persisted, &entry, &destination_profiles, mode)
+    };
+
+    match result {
+        Ok(result) => {
+            let widgets = runtime.borrow().widgets.clone();
+            present_sync_notice(&widgets, "Dotfile synced", &result.message, false);
+            refresh(runtime);
+        }
+        Err(error) => show_message(
+            &runtime.borrow().widgets.window,
+            "Sync profiles failed",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -3761,7 +4419,7 @@ fn prompt_track_custom_path(runtime: Rc<RefCell<AppRuntime>>) {
 
     let box_ = dialog_content_box(&dialog);
     let description = Label::new(Some(
-        "Track a file or folder from any location on disk. Doter will include it in the browser and manage its profile copy inside the repository.",
+        "Track a file or folder under $HOME or $XDG_CONFIG_HOME. Doter stores the custom path definition in the current profile inside the repository and blocks machine-specific paths outside those roots so profile sync stays portable.",
     ));
     description.set_wrap(true);
     description.set_xalign(0.0);
@@ -3810,6 +4468,13 @@ fn choose_custom_path(runtime: Rc<RefCell<AppRuntime>>, action: FileChooserActio
                             &error.to_string(),
                         );
                     } else {
+                        let widgets = runtime.borrow().widgets.clone();
+                        present_sync_notice(
+                            &widgets,
+                            "Custom path tracked",
+                            "Saved this custom path in the active profile metadata.",
+                            false,
+                        );
                         refresh(runtime.clone());
                     }
                 }
@@ -3821,87 +4486,107 @@ fn choose_custom_path(runtime: Rc<RefCell<AppRuntime>>, action: FileChooserActio
 }
 
 fn add_custom_path(runtime: &Rc<RefCell<AppRuntime>>, path: &Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        return Err(anyhow!("{} does not exist", path.display()));
-    }
     let mut guard = runtime.borrow_mut();
-    if guard
+    let home_root = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
+    let xdg_root = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_root.join(".config"));
+    guard
         .persisted
-        .config
-        .custom_paths
-        .iter()
-        .any(|existing| existing == path)
-    {
-        return Err(anyhow!("{} is already being tracked", path.display()));
-    }
-    guard.persisted.config.custom_paths.push(path.to_path_buf());
-    guard.persisted.config.custom_paths.sort();
+        .add_active_custom_path_for_roots(path, &home_root, &xdg_root)?;
     let paths = guard.paths.clone();
     guard.persisted.save(&paths)?;
     Ok(())
 }
 
-fn prompt_copy_profile(runtime: Rc<RefCell<AppRuntime>>) {
-    let widgets = runtime.borrow().widgets.clone();
-    let profiles = runtime.borrow().persisted.config.profiles.clone();
-    if profiles.len() < 2 {
+fn prompt_copy_from_profile(runtime: Rc<RefCell<AppRuntime>>) {
+    let Some(entry) = selected_entry(&runtime) else {
         show_message(
-            &widgets.window,
-            "Not enough profiles",
-            "Create another profile first, then copy dotfiles into it.",
+            &runtime.borrow().widgets.window,
+            "No selection",
+            "Select a dotfile first, then choose which profile to copy it from.",
+        );
+        return;
+    };
+    if entry.managed_state == ManagedState::Conflicted {
+        show_message(
+            &runtime.borrow().widgets.window,
+            "Resolve conflict first",
+            "This dotfile is in a conflicted state. Repair it before copying another profile's version into the current profile.",
         );
         return;
     }
 
+    let widgets = runtime.borrow().widgets.clone();
     let active_profile = runtime.borrow().persisted.config.active_profile.clone();
+    let profiles = runtime
+        .borrow()
+        .persisted
+        .config
+        .profiles
+        .iter()
+        .filter(|profile| *profile != &active_profile)
+        .cloned()
+        .collect::<Vec<_>>();
+    if profiles.is_empty() {
+        show_message(
+            &widgets.window,
+            "Not enough profiles",
+            "Create another profile first, then you can copy this dotfile from it into the current profile.",
+        );
+        return;
+    }
+
     let dialog = Dialog::builder()
-        .title("Copy profile dotfiles")
+        .title("Copy Dotfile From Profile")
         .transient_for(&widgets.window)
         .modal(true)
         .build();
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Continue", ResponseType::Accept);
 
-    let content = dialog.content_area();
-    let box_ = GtkBox::new(Orientation::Vertical, 8);
-    let description = Label::new(Some(
-        "Copy managed dotfiles from one profile into another. If the destination already has files at the same repo paths, you will choose whether to keep them or overwrite them before anything is changed.",
-    ));
+    let box_ = dialog_content_box(&dialog);
+    let description = Label::new(Some(&format!(
+        "Copy '{}' into the current profile '{}'. Choose the profile to copy from. Doter will warn before overwriting the current profile copy, and if this dotfile is active right now it will tell you that the live symlink will change immediately.",
+        entry.display_name, active_profile
+    )));
     description.set_wrap(true);
     description.set_xalign(0.0);
+    let source_label = Label::new(Some("Copy from profile"));
+    source_label.set_xalign(0.0);
     let source_combo = ComboBoxText::new();
-    let destination_combo = ComboBoxText::new();
     for profile in &profiles {
         source_combo.append_text(profile);
-        destination_combo.append_text(profile);
     }
-    let active_index = profiles
-        .iter()
-        .position(|profile| profile == &active_profile)
-        .map(|index| index as u32);
-    source_combo.set_active(active_index);
-    let destination_index = profiles
-        .iter()
-        .position(|profile| profile != &active_profile)
-        .map(|index| index as u32)
-        .or(active_index);
-    destination_combo.set_active(destination_index);
-
-    let source_label = Label::new(Some("Source profile"));
-    source_label.set_xalign(0.0);
-    let destination_label = Label::new(Some("Destination profile"));
+    source_combo.set_active(Some(0));
+    let dotfile_label = Label::new(Some("Selected dotfile"));
+    dotfile_label.set_xalign(0.0);
+    let dotfile_value = Label::new(Some(&format!(
+        "{} ({})",
+        entry.display_name,
+        entry_browser_subtitle(&entry),
+    )));
+    dotfile_value.set_wrap(true);
+    dotfile_value.set_xalign(0.0);
+    dotfile_value.add_css_class("dim-label");
+    let destination_label = Label::new(Some("Current profile"));
     destination_label.set_xalign(0.0);
+    let destination_value = Label::new(Some(&active_profile));
+    destination_value.set_xalign(0.0);
+    destination_value.add_css_class("dim-label");
     box_.append(&description);
     box_.append(&source_label);
     box_.append(&source_combo);
+    box_.append(&dotfile_label);
+    box_.append(&dotfile_value);
     box_.append(&destination_label);
-    box_.append(&destination_combo);
-    content.append(&box_);
+    box_.append(&destination_value);
 
     {
         let runtime = runtime.clone();
         let source_combo = source_combo.clone();
-        let destination_combo = destination_combo.clone();
+        let entry = entry.clone();
+        let active_profile = active_profile.clone();
         dialog.connect_response(move |dialog, response| {
             if response != ResponseType::Accept {
                 dialog.close();
@@ -3912,30 +4597,23 @@ fn prompt_copy_profile(runtime: Rc<RefCell<AppRuntime>>) {
                 .active_text()
                 .map(|text| text.to_string())
                 .unwrap_or_default();
-            let destination = destination_combo
-                .active_text()
-                .map(|text| text.to_string())
-                .unwrap_or_default();
-            if source.is_empty() || destination.is_empty() {
+            if source.is_empty() {
                 show_message(
                     &runtime.borrow().widgets.window,
-                    "Choose profiles",
-                    "Select both a source profile and a destination profile.",
-                );
-                return;
-            }
-            if source == destination {
-                show_message(
-                    &runtime.borrow().widgets.window,
-                    "Choose different profiles",
-                    "The source and destination profiles must be different.",
+                    "Choose a profile",
+                    "Select which profile should provide the source copy.",
                 );
                 return;
             }
 
             let preview = {
                 let guard = runtime.borrow();
-                operations::preview_profile_copy(&guard.persisted, &source, &destination)
+                operations::preview_copy_entry_from_profile(
+                    &guard.persisted,
+                    &entry,
+                    &source,
+                    &active_profile,
+                )
             };
             let preview = match preview {
                 Ok(preview) => preview,
@@ -3950,50 +4628,62 @@ fn prompt_copy_profile(runtime: Rc<RefCell<AppRuntime>>) {
             };
 
             let mode = if preview.conflict_paths.is_empty() {
+                let mut body = format!(
+                    "Copy '{}' from '{}' into the current profile '{}'? No existing destination repo paths will be overwritten.",
+                    entry.display_name, source, active_profile
+                );
+                if preview.destination_active {
+                    body.push_str(
+                        "\n\nThis dotfile is active on this device right now, so replacing the current profile copy will change the live symlinked content immediately.",
+                    );
+                }
                 let confirm = confirm_action(
                     &runtime.borrow().widgets.window,
-                    "Copy profile",
-                    &format!(
-                        "Copy {} managed entr{} from '{}' into '{}'? No destination repo paths will be overwritten.",
-                        preview.managed_entries,
-                        if preview.managed_entries == 1 { "y" } else { "ies" },
-                        source,
-                        destination
-                    ),
+                    "Copy Dotfile From Profile",
+                    &body,
                 );
                 if !confirm {
                     return;
                 }
                 operations::ProfileCopyMode::KeepExisting
             } else {
-                let choices = present_profile_copy_conflict_dialog(
+                let Some(mode) = present_copy_from_profile_conflict_dialog(
                     &runtime.borrow().widgets.window,
+                    &entry.display_name,
                     &source,
-                    &destination,
+                    &active_profile,
                     &preview.conflict_paths,
-                );
-                let Some(mode) = choices else {
+                    preview.destination_active,
+                ) else {
                     return;
                 };
                 mode
             };
 
             dialog.close();
-            run_profile_copy(runtime.clone(), source, destination, mode);
+            run_copy_from_profile(
+                runtime.clone(),
+                entry.clone(),
+                source,
+                active_profile.clone(),
+                mode,
+            );
         });
     }
 
     dialog.present();
 }
 
-fn present_profile_copy_conflict_dialog(
+fn present_copy_from_profile_conflict_dialog(
     window: &ApplicationWindow,
+    entry_name: &str,
     source: &str,
     destination: &str,
     conflict_paths: &[PathBuf],
+    destination_active: bool,
 ) -> Option<operations::ProfileCopyMode> {
     let dialog = Dialog::builder()
-        .title("Destination already has dotfiles")
+        .title("Current profile already has this dotfile")
         .transient_for(window)
         .modal(true)
         .build();
@@ -4001,19 +4691,24 @@ fn present_profile_copy_conflict_dialog(
     dialog.add_button("Keep Existing", ResponseType::Reject);
     dialog.add_button("Overwrite Existing", ResponseType::Accept);
 
-    let content = dialog.content_area();
-    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    let box_ = dialog_content_box(&dialog);
     let preview_lines = conflict_paths
         .iter()
         .take(8)
         .map(|path| format!("- {}", path.display()))
         .collect::<Vec<_>>();
     let mut body = format!(
-        "Copying '{}' into '{}' would touch {} existing destination path(s).\n\nKeep Existing: skip those paths and leave the destination copy as-is.\nOverwrite Existing: replace those destination paths with the source profile copy.",
+        "Copying '{}' from '{}' into '{}' would touch {} existing destination path(s).\n\nKeep Existing: skip those destination paths and leave the current profile copy as-is.\nOverwrite Existing: replace those destination paths with the source profile copy.",
+        entry_name,
         source,
         destination,
         conflict_paths.len()
     );
+    if destination_active {
+        body.push_str(
+            "\n\nThis dotfile is active on this device right now, so overwriting the current profile copy will update the live symlinked content immediately.",
+        );
+    }
     if !preview_lines.is_empty() {
         body.push_str("\n\nExamples:\n");
         body.push_str(&preview_lines.join("\n"));
@@ -4028,7 +4723,6 @@ fn present_profile_copy_conflict_dialog(
     let label = Label::new(Some(&body));
     label.set_wrap(true);
     label.set_xalign(0.0);
-    content.append(&box_);
     box_.append(&label);
 
     let response = glib::MainContext::default().block_on(dialog.run_future());
@@ -4040,8 +4734,9 @@ fn present_profile_copy_conflict_dialog(
     }
 }
 
-fn run_profile_copy(
+fn run_copy_from_profile(
     runtime: Rc<RefCell<AppRuntime>>,
+    entry: DotfileEntry,
     source: String,
     destination: String,
     mode: operations::ProfileCopyMode,
@@ -4049,7 +4744,13 @@ fn run_profile_copy(
     let result = {
         let mut guard = runtime.borrow_mut();
         let paths = guard.paths.clone();
-        let result = operations::copy_profile(&mut guard.persisted, &source, &destination, mode);
+        let result = operations::copy_entry_from_profile(
+            &mut guard.persisted,
+            &entry,
+            &source,
+            &destination,
+            mode,
+        );
         if result.is_ok() {
             let _ = guard.persisted.save(&paths);
         }
@@ -4059,13 +4760,12 @@ fn run_profile_copy(
     match result {
         Ok(result) => {
             let widgets = runtime.borrow().widgets.clone();
-            present_sync_notice(&widgets, "Profile copied", &result.message, false);
-            sync_profile_combo(&runtime);
+            present_sync_notice(&widgets, "Dotfile copied", &result.message, false);
             refresh(runtime);
         }
         Err(error) => show_message(
             &runtime.borrow().widgets.window,
-            "Copy profile failed",
+            "Copy from profile failed",
             &error.to_string(),
         ),
     }
