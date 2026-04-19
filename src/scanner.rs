@@ -240,8 +240,10 @@ fn classify_entry_for_roots(
             ManagedState::Conflicted
         }
     } else if let (Some(target), Some(repo_root)) = (&symlink_target, repo_root) {
+        let points_at_profile_source = target.starts_with(repo_root.join("profiles").join(active_profile));
+        let should_use_shared_source = shared_profiles.iter().any(|linked| linked == active_profile);
         if target == expected_managed_source.as_ref().unwrap_or(target)
-            || target.starts_with(repo_root.join("profiles").join(active_profile))
+            || (points_at_profile_source && !should_use_shared_source)
         {
             ManagedState::ManagedActive
         } else if expected_managed_source
@@ -757,6 +759,43 @@ mod tests {
             .unwrap();
         assert_eq!(entry.managed_state, ManagedState::ManagedActive);
         assert_eq!(entry.shared_profiles, vec!["desktop-arch".to_string(), "laptop".to_string()]);
+    }
+
+    #[test]
+    fn treats_stale_profile_symlink_for_shared_entry_as_inactive() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        let profile_source = repo_root.join("profiles/laptop-arch/config/nvim");
+        let shared_source = repo_root.join("shared/config/nvim");
+        fs::create_dir_all(profile_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared_source.parent().unwrap()).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&profile_source, "old").unwrap();
+        fs::write(&shared_source, "shared").unwrap();
+        fs::write(
+            repo_root.join("shared/links.toml"),
+            "[[entries]]\norigin = \"XdgConfig\"\nkey = \"nvim\"\nprofiles = [\"laptop-arch\"]\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&profile_source, xdg.join("nvim")).unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["laptop-arch".to_string()],
+                active_profile: "laptop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let entry =
+            classify_entry_for_roots(&state, &xdg.join("nvim"), OriginScope::XdgConfig, &home, &xdg)
+                .unwrap();
+        assert_eq!(entry.managed_state, ManagedState::ManagedInactive);
+        assert_eq!(entry.managed_source, Some(shared_source));
     }
 
     #[test]

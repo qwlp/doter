@@ -114,6 +114,58 @@ impl PersistedState {
         self.managed_entries.len() != original_len
     }
 
+    pub fn sync_managed_entries_from_shared_links(&mut self) -> Result<bool> {
+        let Some(repo_root) = self.config.repo_root.clone() else {
+            return Ok(false);
+        };
+        let links = self.load_shared_links()?;
+        if links.entries.is_empty() {
+            return Ok(false);
+        }
+
+        let home = dirs::home_dir().context("Unable to resolve home directory")?;
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        let mut changed = false;
+
+        for record in &mut self.managed_entries {
+            let key = portable_entry_key(record.origin, &record.active_path, &home, &xdg)?;
+            let linked = links.entries.iter().any(|entry| {
+                entry.origin == record.origin
+                    && entry.key == key
+                    && entry.profiles.iter().any(|profile| profile == &record.profile)
+            });
+            if !linked {
+                continue;
+            }
+
+            let shared_source =
+                shared_managed_source_for_roots(&repo_root, record.origin, &record.active_path, &home, &xdg)?;
+            if record.managed_source != shared_source {
+                record.managed_source = shared_source.clone();
+                changed = true;
+            }
+
+            let target = match fs::symlink_metadata(&record.active_path) {
+                Ok(meta) if meta.file_type().is_symlink() => fs::read_link(&record.active_path).ok(),
+                _ => None,
+            };
+            let profile_root = repo_root.join("profiles").join(&record.profile);
+            let points_at_old_profile_source = target
+                .as_ref()
+                .map(|target| target.starts_with(&profile_root) && target != &shared_source)
+                .unwrap_or(false);
+            if points_at_old_profile_source && shared_source.exists() {
+                fs::remove_file(&record.active_path)?;
+                std::os::unix::fs::symlink(&shared_source, &record.active_path)?;
+                changed = true;
+            }
+        }
+
+        Ok(changed)
+    }
+
     pub fn active_profile(&self) -> &str {
         &self.config.active_profile
     }
@@ -355,6 +407,50 @@ pub fn portable_entry_key(
     Ok(key.to_string_lossy().replace('\\', "/"))
 }
 
+fn shared_managed_source_for_roots(
+    repo_root: &Path,
+    origin: crate::model::OriginScope,
+    active_path: &Path,
+    home_root: &Path,
+    xdg_root: &Path,
+) -> Result<PathBuf> {
+    let root = match origin {
+        crate::model::OriginScope::Home => repo_root.join("shared").join("home"),
+        crate::model::OriginScope::XdgConfig => repo_root.join("shared").join("config"),
+        crate::model::OriginScope::Custom => repo_root.join("shared").join("custom"),
+    };
+    let relative = match origin {
+        crate::model::OriginScope::Home => active_path.strip_prefix(home_root)?.to_path_buf(),
+        crate::model::OriginScope::XdgConfig => active_path.strip_prefix(xdg_root)?.to_path_buf(),
+        crate::model::OriginScope::Custom => custom_relative_path(active_path, home_root, xdg_root),
+    };
+    Ok(root.join(relative))
+}
+
+fn custom_relative_path(active_path: &Path, home_root: &Path, xdg_root: &Path) -> PathBuf {
+    if let Ok(relative) = active_path.strip_prefix(xdg_root) {
+        return PathBuf::from("config").join(relative);
+    }
+    if let Ok(relative) = active_path.strip_prefix(home_root) {
+        return PathBuf::from("home").join(relative);
+    }
+    if !active_path.is_absolute() {
+        return PathBuf::from("relative").join(active_path);
+    }
+
+    let mut relative = PathBuf::from("absolute");
+    for component in active_path.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(prefix) => relative.push(prefix.as_os_str()),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => relative.push("parent"),
+            Component::Normal(part) => relative.push(part),
+        }
+    }
+    relative
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +625,56 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Track only paths under $HOME or $XDG_CONFIG_HOME"));
+    }
+
+    #[test]
+    fn syncs_managed_record_and_relinks_stale_shared_symlink() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let home_root = temp.path().join("home");
+        let xdg_root = home_root.join(".config");
+        let old_source = repo_root.join("profiles/laptop-arch/config/nvim");
+        let shared_source = repo_root.join("shared/config/nvim");
+        let active_path = xdg_root.join("nvim");
+        std::fs::create_dir_all(old_source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(shared_source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&xdg_root).unwrap();
+        std::fs::write(&old_source, "old").unwrap();
+        std::fs::write(&shared_source, "shared").unwrap();
+        std::os::unix::fs::symlink(&old_source, &active_path).unwrap();
+        std::fs::write(
+            repo_root.join("shared/links.toml"),
+            "[[entries]]\norigin = \"XdgConfig\"\nkey = \"nvim\"\nprofiles = [\"laptop-arch\"]\n",
+        )
+        .unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root.clone()),
+                profiles: vec!["laptop-arch".to_string()],
+                active_profile: "laptop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: vec![ManagedRecord {
+                id: "xdg:test".to_string(),
+                profile: "laptop-arch".to_string(),
+                active_path: active_path.clone(),
+                managed_source: old_source.clone(),
+                backup_path: None,
+                origin: OriginScope::XdgConfig,
+            }],
+        };
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_root);
+        }
+        let changed = state.sync_managed_entries_from_shared_links().unwrap();
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        assert!(changed);
+        assert_eq!(state.managed_entries[0].managed_source, shared_source);
+        assert_eq!(std::fs::read_link(&active_path).unwrap(), state.managed_entries[0].managed_source);
     }
 }

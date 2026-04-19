@@ -1449,6 +1449,13 @@ fn refresh(runtime: Rc<RefCell<AppRuntime>>) {
         if guard.persisted.sync_profiles_from_repo().unwrap_or(false) {
             let _ = guard.persisted.save(&guard.paths);
         }
+        if guard
+            .persisted
+            .sync_managed_entries_from_shared_links()
+            .unwrap_or(false)
+        {
+            let _ = guard.persisted.save(&guard.paths);
+        }
         if guard.persisted.prune_stale_managed_entries() {
             let _ = guard.persisted.save(&guard.paths);
         }
