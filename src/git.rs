@@ -417,6 +417,42 @@ pub fn remove_from_index_and_delete(repo_root: &Path, path: &Path) -> Result<()>
     Ok(())
 }
 
+pub fn remove_from_index_keep_worktree(repo_root: &Path, path: &Path) -> Result<bool> {
+    let repo = Repository::open(repo_root)?;
+    let workdir = repo.workdir().context("Repository has no workdir")?;
+    let relative = path.strip_prefix(workdir).unwrap_or(path);
+    let relative_text = relative.to_string_lossy().to_string();
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rm")
+        .arg("--cached")
+        .arg("-r")
+        .arg("--ignore-unmatch")
+        .arg("--")
+        .arg(&relative_text)
+        .output()
+        .with_context(|| format!("Failed to start git rm --cached for {}", relative.display()))?;
+
+    if output.status.success() {
+        let changed = !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+            || !String::from_utf8_lossy(&output.stderr).trim().is_empty();
+        return Ok(changed);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let message = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("git rm --cached failed for {}", relative.display())
+    };
+    Err(anyhow!(message))
+}
+
 pub fn fetch_and_merge_remote(repo_root: &Path, remote_name: &str) -> Result<()> {
     sync_with_remote(repo_root, remote_name).map(|_| ())
 }
@@ -505,6 +541,23 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with("init.lua"))
         );
+    }
+
+    #[test]
+    fn removes_from_index_but_keeps_worktree_file() {
+        let temp = tempdir().unwrap();
+        let repo_root = init_repo(temp.path()).unwrap();
+        let file = repo_root.join("tracked.txt");
+        fs::write(&file, "hello").unwrap();
+        stage_paths(&repo_root, std::slice::from_ref(&file)).unwrap();
+        commit_staged(&repo_root, "Track file").unwrap();
+
+        let removed = remove_from_index_keep_worktree(&repo_root, &file).unwrap();
+
+        assert!(removed);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
+        let state = repo_status(&repo_root).unwrap();
+        assert!(state.untracked_files.iter().any(|path| path == "tracked.txt"));
     }
 
     #[test]

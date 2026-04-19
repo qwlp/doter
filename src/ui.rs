@@ -4252,25 +4252,51 @@ fn ignore_selected_repo_path(runtime: Rc<RefCell<AppRuntime>>) {
         }
     };
 
-    let Some(updated) = append_gitignore_rule(&existing, &pattern) else {
+    let added_ignore_rule = if let Some(updated) = append_gitignore_rule(&existing, &pattern) {
+        if let Err(error) = fs::write(&gitignore_path, updated) {
+            show_message(
+                &widgets.window,
+                "Gitignore failed",
+                &format!("Failed to update {}: {}", gitignore_path.display(), error),
+            );
+            return;
+        }
+        true
+    } else {
+        false
+    };
+
+    let repo_root = runtime.borrow().persisted.config.repo_root.clone();
+    let removed_from_index = if let Some(repo_root) = repo_root {
+        match git::remove_from_index_keep_worktree(&repo_root, &target_path) {
+            Ok(changed) => changed,
+            Err(error) => {
+                show_message(
+                    &widgets.window,
+                    "Ignore failed",
+                    &format!(
+                        "Updated {}, but failed to untrack {}: {}",
+                        repo_file_label(&managed_source, &gitignore_path),
+                        repo_file_label(&managed_source, &target_path),
+                        error
+                    ),
+                );
+                return;
+            }
+        }
+    } else {
+        false
+    };
+
+    if !added_ignore_rule && !removed_from_index {
         present_sync_notice(
             &widgets,
             "Already ignored",
             &format!(
-                "{} is already ignored by {}.",
+                "{} is already ignored and not tracked anymore.",
                 repo_file_label(&managed_source, &target_path),
-                repo_file_label(&managed_source, &gitignore_path)
             ),
             false,
-        );
-        return;
-    };
-
-    if let Err(error) = fs::write(&gitignore_path, updated) {
-        show_message(
-            &widgets.window,
-            "Gitignore failed",
-            &format!("Failed to update {}: {}", gitignore_path.display(), error),
         );
         return;
     }
@@ -4283,12 +4309,33 @@ fn ignore_selected_repo_path(runtime: Rc<RefCell<AppRuntime>>) {
     sync_repo_editor(&runtime);
     present_sync_notice(
         &widgets,
-        "Updated gitignore",
-        &format!(
-            "Added {} to {}.",
-            pattern,
-            repo_file_label(&managed_source, &gitignore_path)
-        ),
+        if removed_from_index {
+            "Ignored and untracked"
+        } else {
+            "Updated gitignore"
+        },
+        &match (added_ignore_rule, removed_from_index) {
+            (true, true) => format!(
+                "Added {} to {} and removed {} from git tracking.",
+                pattern,
+                repo_file_label(&managed_source, &gitignore_path),
+                repo_file_label(&managed_source, &target_path)
+            ),
+            (true, false) => format!(
+                "Added {} to {}.",
+                pattern,
+                repo_file_label(&managed_source, &gitignore_path)
+            ),
+            (false, true) => format!(
+                "{} was already ignored. Removed {} from git tracking.",
+                repo_file_label(&managed_source, &target_path),
+                repo_file_label(&managed_source, &target_path)
+            ),
+            (false, false) => format!(
+                "{} is already ignored and not tracked anymore.",
+                repo_file_label(&managed_source, &target_path)
+            ),
+        },
         false,
     );
 }
