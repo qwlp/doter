@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Doter
+Comment=Manage dotfiles with Git
+Exec=doter
+Icon=doter
+Terminal=false
+Categories=Utility;GTK;
+StartupNotify=true

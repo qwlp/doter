@@ -104,7 +104,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "doot"
+name = "doter"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -518,7 +518,7 @@ mod tests {
     fn enables_and_disables_file() {
         let temp = tempdir().unwrap();
         let real_home = dirs::home_dir().unwrap();
-        let home = real_home.join(".doot-test-home");
+        let home = real_home.join(".doter-test-home");
         std::fs::create_dir_all(&home).unwrap();
 
         let repo_root = temp.path().join("repo");

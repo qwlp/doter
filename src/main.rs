@@ -1,3 +1,3 @@
 fn main() {
-    doot::app::run();
+    doter::app::run();
 }

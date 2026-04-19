@@ -164,7 +164,7 @@ pub fn build(app: &Application) {
     let persisted = PersistedState::load(&paths).unwrap_or_default();
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Doot")
+        .title("Doter")
         .default_width(1320)
         .default_height(840)
         .build();
@@ -1101,7 +1101,7 @@ fn prompt_repo_setup(runtime: Rc<RefCell<AppRuntime>>) {
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 8);
     let description = Label::new(Some(
-        "Doot needs a git repository to store managed dotfiles. Create one or point to an existing directory.",
+        "Doter needs a git repository to store managed dotfiles. Create one or point to an existing directory.",
     ));
     description.set_wrap(true);
     description.set_xalign(0.0);
@@ -3045,7 +3045,7 @@ fn prompt_commit(runtime: Rc<RefCell<AppRuntime>>) {
     description.set_wrap(true);
     description.set_xalign(0.0);
     let entry = Entry::new();
-    entry.set_placeholder_text(Some("Auto-committed via Doot"));
+    entry.set_placeholder_text(Some("Auto-committed via Doter"));
     box_.append(&description);
     box_.append(&entry);
     content.append(&box_);
@@ -3057,7 +3057,7 @@ fn prompt_commit(runtime: Rc<RefCell<AppRuntime>>) {
             if response == ResponseType::Accept {
                 let message = entry.text().to_string();
                 let message = if message.is_empty() {
-                    "Auto-committed via Doot".to_string()
+                    "Auto-committed via Doter".to_string()
                 } else {
                     message
                 };

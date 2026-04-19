@@ -2,7 +2,7 @@ use crate::ui;
 use gtk4::prelude::*;
 use gtk4::{gdk, CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION};
 
-const APP_ID: &str = "com.tsp.doot";
+const APP_ID: &str = "com.tsp.doter";
 const APP_CSS: &str = r#"
 window {
     background: #1f1f31;

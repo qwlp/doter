@@ -118,7 +118,7 @@ pub fn commit_staged(repo_root: &Path, message: &str) -> Result<()> {
     let tree = repo.find_tree(tree_id)?;
     let signature = repo
         .signature()
-        .or_else(|_| Signature::now("Doot", "doot@example.invalid"))
+        .or_else(|_| Signature::now("Doter", "doter@example.invalid"))
         .context("Unable to build git signature")?;
 
     let parent_commit = repo

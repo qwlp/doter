@@ -1,7 +1,9 @@
 [package]
-name = "doot"
+name = "doter"
 version = "0.1.0"
 edition = "2024"
+description = "A simple GTK4 GUI for managing dotfiles with Git"
+repository = "https://github.com/qwlp/doter"
 
 [dependencies]
 anyhow = "1.0"

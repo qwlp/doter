@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const APP_DIR: &str = "doot";
+const APP_DIR: &str = "doter";
 const CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
 
