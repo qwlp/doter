@@ -20,8 +20,8 @@ mkdir -p "$staging_dir" "$dist_root"
 cargo build --release
 
 install -Dm755 "${target_dir}/${pkg_name}" "${staging_dir}/${pkg_name}"
-install -Dm644 "packaging/linux/doter.desktop" "${staging_dir}/doter.desktop"
-install -Dm644 "assets/app.png" "${staging_dir}/doter.png"
+install -Dm644 "packaging/linux/doter.desktop" "${staging_dir}/com.tsp.doter.desktop"
+install -Dm644 "assets/logo.png" "${staging_dir}/doter.png"
 install -Dm644 "README.md" "${staging_dir}/README.md"
 install -Dm644 "LICENSE" "${staging_dir}/LICENSE"
 

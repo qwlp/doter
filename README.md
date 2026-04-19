@@ -53,3 +53,11 @@ Before submitting to AUR, add a real project license. The current package metada
 ## License
 
 MIT
+
+## Linux Desktop Integration
+
+The release archive and AUR package install:
+
+- the `doter` binary
+- a desktop launcher for application menus
+- the bundled icon from `assets/logo.png`

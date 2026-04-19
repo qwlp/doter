@@ -8,3 +8,5 @@ Icon=doter
 Terminal=false
 Categories=Utility;GTK;
 StartupNotify=true
+StartupWMClass=com.tsp.doter
+Keywords=dotfiles;git;gtk;config;
