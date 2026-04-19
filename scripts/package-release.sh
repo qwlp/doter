@@ -23,6 +23,7 @@ install -Dm755 "${target_dir}/${pkg_name}" "${staging_dir}/${pkg_name}"
 install -Dm644 "packaging/linux/doter.desktop" "${staging_dir}/doter.desktop"
 install -Dm644 "assets/app.png" "${staging_dir}/doter.png"
 install -Dm644 "README.md" "${staging_dir}/README.md"
+install -Dm644 "LICENSE" "${staging_dir}/LICENSE"
 
 tar -C "$dist_root" -czf "$archive_path" "$archive_root"
 sha256sum "$archive_path"

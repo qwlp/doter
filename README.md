@@ -49,3 +49,7 @@ makepkg --printsrcinfo > .SRCINFO
 ```
 
 Before submitting to AUR, add a real project license. The current package metadata uses `custom` as a temporary placeholder because the repository does not include a license file yet.
+
+## License
+
+MIT
