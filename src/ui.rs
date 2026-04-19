@@ -17,7 +17,7 @@ use similar::{ChangeTag, TextDiff};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -138,6 +138,19 @@ enum SortMode {
     Scope,
     Status,
 }
+
+const EDITOR_LINE_NUMBER_LIMIT: usize = 25_000;
+const EDITOR_EDIT_BYTE_LIMIT: usize = 700_000;
+const EDITOR_EDIT_LINE_LIMIT: usize = 20_000;
+const EDITOR_PREVIEW_CHAR_LIMIT: usize = 180_000;
+const EDITOR_PREVIEW_LINE_LIMIT: usize = 2_500;
+const EDITOR_HIGHLIGHT_BYTE_LIMIT: usize = 400_000;
+const EDITOR_HIGHLIGHT_LINE_LIMIT: usize = 8_000;
+const DIFF_BYTE_LIMIT: usize = 350_000;
+const DIFF_LINE_LIMIT: usize = 12_000;
+const DIFF_PREVIEW_CHAR_LIMIT: usize = 140_000;
+const DIFF_PREVIEW_LINE_LIMIT: usize = 2_000;
+const DIFF_RENDER_LINE_LIMIT: usize = 3_500;
 
 pub fn build(app: &Application) {
     let paths = match AppPaths::discover() {
@@ -459,13 +472,17 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let repo_editor_view = TextView::new();
     repo_editor_view.set_editable(true);
     repo_editor_view.set_monospace(true);
+    repo_editor_view.set_wrap_mode(gtk4::WrapMode::None);
     repo_editor_view.set_vexpand(true);
+    repo_editor_view.set_size_request(-1, 0);
     let repo_editor_line_numbers = TextView::new();
     repo_editor_line_numbers.set_editable(false);
     repo_editor_line_numbers.set_cursor_visible(false);
     repo_editor_line_numbers.set_monospace(true);
+    repo_editor_line_numbers.set_wrap_mode(gtk4::WrapMode::None);
     repo_editor_line_numbers.set_vexpand(true);
     repo_editor_line_numbers.set_width_request(48);
+    repo_editor_line_numbers.set_size_request(48, 0);
     repo_editor_line_numbers.add_css_class("line-numbers");
     let line_numbers_scroll = ScrolledWindow::builder()
         .hscrollbar_policy(PolicyType::Never)
@@ -474,16 +491,26 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         .min_content_width(48)
         .child(&repo_editor_line_numbers)
         .build();
+    line_numbers_scroll.set_propagate_natural_height(false);
+    line_numbers_scroll.set_min_content_height(0);
     let repo_editor_scroll = ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
+        .hscrollbar_policy(PolicyType::Automatic)
+        .vscrollbar_policy(PolicyType::Automatic)
         .child(&repo_editor_view)
         .build();
+    repo_editor_scroll.set_overlay_scrolling(false);
+    repo_editor_scroll.set_propagate_natural_height(false);
+    repo_editor_scroll.set_min_content_height(0);
     line_numbers_scroll.set_vadjustment(Some(&repo_editor_scroll.vadjustment()));
     let editor_body = GtkBox::new(Orientation::Horizontal, 0);
+    editor_body.set_hexpand(true);
+    editor_body.set_vexpand(true);
     editor_body.append(&line_numbers_scroll);
     editor_body.append(&repo_editor_scroll);
     let editor_page = GtkBox::new(Orientation::Vertical, 6);
+    editor_page.set_hexpand(true);
     editor_page.set_vexpand(true);
     editor_page.append(&repo_editor_header);
     editor_page.append(&editor_body);
@@ -500,12 +527,16 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     diff_base_view.set_editable(false);
     diff_base_view.set_cursor_visible(false);
     diff_base_view.set_monospace(true);
+    diff_base_view.set_wrap_mode(gtk4::WrapMode::None);
     diff_base_view.set_vexpand(true);
+    diff_base_view.set_size_request(-1, 0);
     let diff_current_view = TextView::new();
     diff_current_view.set_editable(false);
     diff_current_view.set_cursor_visible(false);
     diff_current_view.set_monospace(true);
+    diff_current_view.set_wrap_mode(gtk4::WrapMode::None);
     diff_current_view.set_vexpand(true);
+    diff_current_view.set_size_request(-1, 0);
     let diff_base_title = Label::new(Some("HEAD"));
     diff_base_title.set_xalign(0.0);
     diff_base_title.add_css_class("heading");
@@ -515,29 +546,46 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let diff_base_scroll = ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
+        .hscrollbar_policy(PolicyType::Automatic)
+        .vscrollbar_policy(PolicyType::Automatic)
         .child(&diff_base_view)
         .build();
+    diff_base_scroll.set_overlay_scrolling(false);
+    diff_base_scroll.set_propagate_natural_height(false);
+    diff_base_scroll.set_min_content_height(0);
     let diff_current_scroll = ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
+        .hscrollbar_policy(PolicyType::Automatic)
+        .vscrollbar_policy(PolicyType::Automatic)
         .child(&diff_current_view)
         .build();
+    diff_current_scroll.set_overlay_scrolling(false);
+    diff_current_scroll.set_propagate_natural_height(false);
+    diff_current_scroll.set_min_content_height(0);
     let diff_base_panel = GtkBox::new(Orientation::Vertical, 6);
     diff_base_panel.add_css_class("section-content");
+    diff_base_panel.set_hexpand(true);
+    diff_base_panel.set_vexpand(true);
     diff_base_panel.append(&diff_base_title);
     diff_base_panel.append(&diff_base_scroll);
     let diff_current_panel = GtkBox::new(Orientation::Vertical, 6);
     diff_current_panel.add_css_class("section-content");
+    diff_current_panel.set_hexpand(true);
+    diff_current_panel.set_vexpand(true);
     diff_current_panel.append(&diff_current_title);
     diff_current_panel.append(&diff_current_scroll);
     let diff_split = Paned::new(Orientation::Horizontal);
     diff_split.set_wide_handle(true);
     diff_split.set_position(420);
+    diff_split.set_hexpand(true);
+    diff_split.set_vexpand(true);
     diff_split.set_shrink_start_child(true);
     diff_split.set_shrink_end_child(true);
     diff_split.set_start_child(Some(&diff_base_panel));
     diff_split.set_end_child(Some(&diff_current_panel));
     let diff_page = GtkBox::new(Orientation::Vertical, 6);
+    diff_page.set_hexpand(true);
     diff_page.set_vexpand(true);
     diff_page.append(&diff_status_label);
     diff_page.append(&diff_split);
@@ -550,6 +598,8 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let workspace_split = Paned::new(Orientation::Horizontal);
     workspace_split.set_wide_handle(true);
     workspace_split.set_position(250);
+    workspace_split.set_hexpand(true);
+    workspace_split.set_vexpand(true);
     workspace_split.set_shrink_start_child(true);
     workspace_split.set_shrink_end_child(true);
     workspace_split.set_start_child(Some(&explorer_shell));
@@ -559,13 +609,19 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     workspace_section.append(&workspace_path_label);
     workspace_section.append(&workspace_split);
 
-    right_panel.append(&overview_section);
-    right_panel.append(&workspace_section);
     let right_scroll = ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
         .child(&right_panel)
         .build();
+    right_scroll.set_overlay_scrolling(false);
+    right_scroll.set_propagate_natural_height(false);
+    right_scroll.set_min_content_height(0);
+
+    right_panel.append(&overview_section);
+    right_panel.append(&workspace_section);
 
     content.set_start_child(Some(&left_panel));
     content.set_end_child(Some(&right_scroll));
@@ -734,10 +790,7 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             match set_selected_repo_file_from_row(&runtime, row) {
                 RepoSelectionAction::None => {}
                 RepoSelectionAction::RefreshTree => render_repo_explorer(&runtime2),
-                RepoSelectionAction::LoadFile => {
-                    load_repo_editor(&runtime2);
-                    load_diff_view(&runtime2);
-                }
+                RepoSelectionAction::LoadFile => refresh_active_workspace_view(&runtime2),
             }
         });
     }
@@ -750,10 +803,7 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             match activate_repo_row(&runtime, row) {
                 RepoSelectionAction::None => {}
                 RepoSelectionAction::RefreshTree => render_repo_explorer(&runtime2),
-                RepoSelectionAction::LoadFile => {
-                    load_repo_editor(&runtime2);
-                    load_diff_view(&runtime2);
-                }
+                RepoSelectionAction::LoadFile => refresh_active_workspace_view(&runtime2),
             }
         });
     }
@@ -977,6 +1027,7 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
         runtime.clone(),
         |runtime| {
             set_workspace_mode(&runtime.borrow().widgets, "editor");
+            load_repo_editor(&runtime);
         },
         |widgets| widgets.show_editor_button.clone(),
     );
@@ -985,6 +1036,7 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
         runtime.clone(),
         |runtime| {
             set_workspace_mode(&runtime.borrow().widgets, "diff");
+            load_diff_view(&runtime);
         },
         |widgets| widgets.show_diff_button.clone(),
     );
@@ -1495,8 +1547,22 @@ fn sync_repo_editor(runtime: &Rc<RefCell<AppRuntime>>) {
         repo_files.len(),
         if repo_files.len() == 1 { "" } else { "s" }
     ));
-    load_repo_editor(runtime);
-    load_diff_view(runtime);
+    refresh_active_workspace_view(runtime);
+}
+
+fn refresh_active_workspace_view(runtime: &Rc<RefCell<AppRuntime>>) {
+    let mode = runtime
+        .borrow()
+        .widgets
+        .workspace_stack
+        .visible_child_name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "editor".to_string());
+    if mode == "diff" {
+        load_diff_view(runtime);
+    } else {
+        load_repo_editor(runtime);
+    }
 }
 
 fn clear_repo_editor(runtime: &Rc<RefCell<AppRuntime>>, status: &str) {
@@ -1629,20 +1695,55 @@ fn load_repo_editor(runtime: &Rc<RefCell<AppRuntime>>) {
     widgets.ignore_repo_button.set_sensitive(true);
     widgets.reload_repo_button.set_sensitive(true);
 
-    match fs::read_to_string(&selected_repo_file) {
-        Ok(content) => {
+    match load_text_with_limit(&selected_repo_file, EDITOR_PREVIEW_CHAR_LIMIT) {
+        Ok((content, truncated)) => {
             let label = repo_file_label(&managed_source, &selected_repo_file);
+            let line_count = content.split('\n').count().max(1);
+            let editable = !truncated
+                && content.len() <= EDITOR_EDIT_BYTE_LIMIT
+                && line_count <= EDITOR_EDIT_LINE_LIMIT;
+            let (rendered_content, rendered_truncated) =
+                truncate_for_preview_lines(&content, EDITOR_PREVIEW_LINE_LIMIT, "editor preview");
+            let rendered_line_count = rendered_content.split('\n').count().max(1);
+            let highlight_enabled =
+                !rendered_truncated && should_enable_editor_highlighting(content.len(), line_count);
+            let status_suffix = if !editable {
+                " (read-only preview: file is too large to edit safely here)"
+            } else if highlight_enabled {
+                ""
+            } else {
+                " (highlighting disabled for large file)"
+            };
+            let status_suffix = if rendered_truncated {
+                format!(
+                    "{} (showing first {} lines)",
+                    status_suffix, EDITOR_PREVIEW_LINE_LIMIT
+                )
+            } else {
+                status_suffix.to_string()
+            };
             widgets
                 .repo_editor_status
-                .set_label(&format!("Editing: {}", label));
-            update_editor_line_numbers(&widgets.repo_editor_line_numbers, &content);
-            widgets.repo_editor_view.buffer().set_text(&content);
-            apply_syntax_highlighting(&widgets.repo_editor_view, &selected_repo_file, &content);
-            widgets.repo_editor_view.set_editable(true);
-            widgets.save_repo_button.set_sensitive(true);
+                .set_label(&format!("Editing: {}{}", label, status_suffix));
+            update_editor_line_numbers(&widgets.repo_editor_line_numbers, rendered_line_count);
+            widgets
+                .repo_editor_view
+                .buffer()
+                .set_text(&rendered_content);
+            if editable && highlight_enabled {
+                apply_syntax_highlighting(
+                    &widgets.repo_editor_view,
+                    &selected_repo_file,
+                    &rendered_content,
+                );
+            } else {
+                clear_text_view_highlighting(&widgets.repo_editor_view);
+            }
+            widgets.repo_editor_view.set_editable(editable);
+            widgets.save_repo_button.set_sensitive(editable);
             {
                 let mut guard = runtime.borrow_mut();
-                guard.loaded_repo_content = Some(content);
+                guard.loaded_repo_content = if editable { Some(content) } else { None };
             }
         }
         Err(error) if error.kind() == ErrorKind::InvalidData => {
@@ -1759,37 +1860,87 @@ fn load_diff_view(runtime: &Rc<RefCell<AppRuntime>>) {
     };
 
     let base_text = base_content.as_deref().unwrap_or("");
-    let (base_rendered, current_rendered) = render_side_by_side_diff(base_text, &current_content);
+    let current_line_count = current_content.split('\n').count().max(1);
+    let base_line_count = base_text.split('\n').count().max(1);
+    let too_large_for_diff = current_content.len() > DIFF_BYTE_LIMIT
+        || base_text.len() > DIFF_BYTE_LIMIT
+        || current_line_count > DIFF_LINE_LIMIT
+        || base_line_count > DIFF_LINE_LIMIT;
+
+    if too_large_for_diff {
+        let base_preview = truncate_for_preview(base_text, DIFF_PREVIEW_CHAR_LIMIT);
+        let current_preview = truncate_for_preview(&current_content, DIFF_PREVIEW_CHAR_LIMIT);
+        let (base_preview, base_line_truncated) =
+            truncate_for_preview_lines(&base_preview, DIFF_PREVIEW_LINE_LIMIT, "diff preview");
+        let (current_preview, current_line_truncated) =
+            truncate_for_preview_lines(&current_preview, DIFF_PREVIEW_LINE_LIMIT, "diff preview");
+        widgets.diff_base_view.buffer().set_text(&base_preview);
+        widgets
+            .diff_current_view
+            .buffer()
+            .set_text(&current_preview);
+        clear_text_view_highlighting(&widgets.diff_base_view);
+        clear_text_view_highlighting(&widgets.diff_current_view);
+        let line_limit_hint = if base_line_truncated || current_line_truncated {
+            format!(" Showing first {} lines only.", DIFF_PREVIEW_LINE_LIMIT)
+        } else {
+            String::new()
+        };
+        widgets.diff_status_label.set_label(&format!(
+            "Diff preview disabled for large files to keep the app responsive.{}",
+            line_limit_hint
+        ));
+        return;
+    }
+
+    let (base_rendered, current_rendered, diff_truncated) =
+        render_side_by_side_diff(base_text, &current_content, DIFF_RENDER_LINE_LIMIT);
     widgets.diff_base_view.buffer().set_text(&base_rendered);
     widgets
         .diff_current_view
         .buffer()
         .set_text(&current_rendered);
-    apply_diff_syntax_highlighting(&widgets.diff_base_view, &selected_repo_file, &base_rendered);
-    apply_diff_syntax_highlighting(
-        &widgets.diff_current_view,
-        &selected_repo_file,
-        &current_rendered,
-    );
+    if diff_truncated {
+        clear_text_view_highlighting(&widgets.diff_base_view);
+        clear_text_view_highlighting(&widgets.diff_current_view);
+    } else {
+        apply_diff_syntax_highlighting(
+            &widgets.diff_base_view,
+            &selected_repo_file,
+            &base_rendered,
+        );
+        apply_diff_syntax_highlighting(
+            &widgets.diff_current_view,
+            &selected_repo_file,
+            &current_rendered,
+        );
+    }
 
     let status = if base_content.is_none() {
         "New file in working tree. Nothing tracked in HEAD yet.".to_string()
     } else if base_text == current_content {
         "No textual changes between HEAD and the working tree.".to_string()
+    } else if diff_truncated {
+        format!(
+            "Showing a side-by-side line diff between HEAD and the working tree (limited to {} lines for responsiveness).",
+            DIFF_RENDER_LINE_LIMIT
+        )
     } else {
         "Showing a side-by-side line diff between HEAD and the working tree.".to_string()
     };
     widgets.diff_status_label.set_label(&status);
 }
 
-fn render_side_by_side_diff(base: &str, current: &str) -> (String, String) {
+fn render_side_by_side_diff(base: &str, current: &str, max_lines: usize) -> (String, String, bool) {
     let diff = TextDiff::from_lines(base, current);
     let mut left = String::new();
     let mut right = String::new();
     let mut left_line = 1usize;
     let mut right_line = 1usize;
+    let mut rendered_lines = 0usize;
+    let mut truncated = false;
 
-    for op in diff.ops() {
+    'ops: for op in diff.ops() {
         for change in diff.iter_changes(op) {
             let rendered = change.to_string();
             let mut lines = rendered.lines();
@@ -1797,6 +1948,10 @@ fn render_side_by_side_diff(base: &str, current: &str) -> (String, String) {
                 lines.next();
             }
             for line in lines {
+                if rendered_lines >= max_lines {
+                    truncated = true;
+                    break 'ops;
+                }
                 match change.tag() {
                     ChangeTag::Equal => {
                         push_diff_line(&mut left, Some(left_line), line);
@@ -1815,6 +1970,7 @@ fn render_side_by_side_diff(base: &str, current: &str) -> (String, String) {
                         right_line += 1;
                     }
                 }
+                rendered_lines += 1;
             }
         }
     }
@@ -1824,7 +1980,20 @@ fn render_side_by_side_diff(base: &str, current: &str) -> (String, String) {
         push_diff_line(&mut right, None, "");
     }
 
-    (left, right)
+    if truncated {
+        push_diff_line(
+            &mut left,
+            None,
+            "... diff output truncated for performance ...",
+        );
+        push_diff_line(
+            &mut right,
+            None,
+            "... diff output truncated for performance ...",
+        );
+    }
+
+    (left, right, truncated)
 }
 
 fn push_diff_line(output: &mut String, line_no: Option<usize>, line: &str) {
@@ -1834,13 +2003,90 @@ fn push_diff_line(output: &mut String, line_no: Option<usize>, line: &str) {
     }
 }
 
-fn update_editor_line_numbers(view: &TextView, content: &str) {
-    let line_count = content.split('\n').count().max(1);
-    let numbers = (1..=line_count)
+fn update_editor_line_numbers(view: &TextView, line_count: usize) {
+    let capped_line_count = line_count.min(EDITOR_LINE_NUMBER_LIMIT);
+    let mut numbers = (1..=capped_line_count)
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
         .join("\n");
+    if line_count > capped_line_count {
+        numbers.push_str("\n...");
+    }
     view.buffer().set_text(&numbers);
+}
+
+fn should_enable_editor_highlighting(byte_len: usize, line_count: usize) -> bool {
+    byte_len <= EDITOR_HIGHLIGHT_BYTE_LIMIT && line_count <= EDITOR_HIGHLIGHT_LINE_LIMIT
+}
+
+fn truncate_for_preview(content: &str, max_chars: usize) -> String {
+    let char_count = content.chars().count();
+    if char_count <= max_chars {
+        return content.to_string();
+    }
+    let mut preview = content.chars().take(max_chars).collect::<String>();
+    preview.push_str("\n\n... preview truncated for performance ...");
+    preview
+}
+
+fn truncate_for_preview_lines(content: &str, max_lines: usize, label: &str) -> (String, bool) {
+    let mut output = String::new();
+    let mut line_count = 0usize;
+    let mut truncated = false;
+
+    for line in content.lines() {
+        if line_count >= max_lines {
+            truncated = true;
+            break;
+        }
+        output.push_str(line);
+        output.push('\n');
+        line_count += 1;
+    }
+
+    if !truncated {
+        if content.ends_with('\n') {
+            return (output, false);
+        }
+        return (content.to_string(), false);
+    }
+
+    output.push_str(&format!("\n... {} truncated for performance ...", label));
+    (output, true)
+}
+
+fn load_text_with_limit(path: &Path, max_chars: usize) -> std::io::Result<(String, bool)> {
+    let mut file = fs::File::open(path)?;
+    let max_bytes = max_chars.saturating_mul(4).saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.min(256 * 1024));
+    let mut chunk = [0u8; 16 * 1024];
+
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = read.min(remaining);
+        bytes.extend_from_slice(&chunk[..take]);
+        if bytes.len() >= max_bytes {
+            break;
+        }
+    }
+
+    let mut text = String::from_utf8(bytes)
+        .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "not valid UTF-8"))?;
+
+    let mut truncated = false;
+    if text.chars().count() > max_chars {
+        text = truncate_for_preview(&text, max_chars);
+        truncated = true;
+    }
+
+    Ok((text, truncated))
 }
 
 fn set_workspace_mode(widgets: &Widgets, mode: &str) {
@@ -3413,8 +3659,7 @@ fn prompt_remote(runtime: Rc<RefCell<AppRuntime>>) {
 }
 
 fn reload_repo_editor_action(runtime: Rc<RefCell<AppRuntime>>) {
-    load_repo_editor(&runtime);
-    load_diff_view(&runtime);
+    refresh_active_workspace_view(&runtime);
 }
 
 fn save_repo_editor(runtime: Rc<RefCell<AppRuntime>>) {

@@ -1,6 +1,6 @@
 use crate::ui;
 use gtk4::prelude::*;
-use gtk4::{CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION, gdk};
+use gtk4::{gdk, CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION};
 
 const APP_ID: &str = "com.tsp.doot";
 const APP_CSS: &str = r#"
@@ -201,33 +201,38 @@ scrolledwindow {
 scrollbar {
     background: transparent;
     border: none;
-    min-width: 10px;
-    min-height: 10px;
+    min-width: 12px;
+    min-height: 12px;
 }
 
 scrollbar slider {
-    min-width: 8px;
-    min-height: 36px;
-    margin: 2px;
+    min-width: 9px;
+    min-height: 44px;
+    margin: 3px;
     border-radius: 999px;
-    background: alpha(#d8d4e7, 0.38);
-    border: 1px solid alpha(#ffffff, 0.06);
+    background: alpha(#d8d4e7, 0.48);
+    border: 1px solid alpha(#ffffff, 0.08);
 }
 
 scrollbar slider:hover {
-    background: alpha(#f0ecff, 0.52);
+    background: alpha(#f0ecff, 0.65);
 }
 
 scrollbar slider:active {
-    background: alpha(#ffffff, 0.72);
+    background: alpha(#ffffff, 0.82);
 }
 
 scrollbar.vertical slider {
-    min-height: 52px;
+    min-height: 56px;
 }
 
 scrollbar.horizontal slider {
-    min-width: 52px;
+    min-width: 56px;
+}
+
+scrolledwindow:focus-within scrollbar slider {
+    background: alpha(#9ec2ff, 0.72);
+    border-color: alpha(#6ba8ff, 0.42);
 }
 
 paned > separator {
