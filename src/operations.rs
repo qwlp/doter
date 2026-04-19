@@ -479,13 +479,15 @@ fn managed_path_for_roots(
     home_root: &Path,
     xdg_root: &Path,
 ) -> Result<PathBuf> {
-    let relative = match origin {
-        OriginScope::Home => active_path.strip_prefix(home_root)?,
-        OriginScope::XdgConfig => active_path.strip_prefix(xdg_root)?,
-    };
     let root = match origin {
         OriginScope::Home => repo_root.join("profiles").join(profile).join("home"),
         OriginScope::XdgConfig => repo_root.join("profiles").join(profile).join("config"),
+        OriginScope::Custom => repo_root.join("profiles").join(profile).join("custom"),
+    };
+    let relative = match origin {
+        OriginScope::Home => active_path.strip_prefix(home_root)?.to_path_buf(),
+        OriginScope::XdgConfig => active_path.strip_prefix(xdg_root)?.to_path_buf(),
+        OriginScope::Custom => custom_relative_path(active_path),
     };
     Ok(root.join(relative))
 }
@@ -494,12 +496,34 @@ fn backup_path_for(paths: &AppPaths, origin: OriginScope, active_path: &Path) ->
     let label = match origin {
         OriginScope::Home => "home",
         OriginScope::XdgConfig => "config",
+        OriginScope::Custom => "custom",
     };
     let safe_name = active_path
         .to_string_lossy()
         .replace('/', "__")
         .replace(':', "_");
     paths.backup_dir.join(format!("{label}_{safe_name}"))
+}
+
+fn custom_relative_path(active_path: &Path) -> PathBuf {
+    let mut relative = PathBuf::new();
+    if active_path.is_absolute() {
+        relative.push("absolute");
+    } else {
+        relative.push("relative");
+    }
+
+    for component in active_path.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(prefix) => relative.push(prefix.as_os_str()),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => relative.push("parent"),
+            Component::Normal(part) => relative.push(part),
+        }
+    }
+
+    relative
 }
 
 fn ensure_conflict_managed_source(
@@ -1191,5 +1215,28 @@ mod tests {
                 && record.active_path == active_path
                 && record.managed_source == destination_root
         }));
+    }
+
+    #[test]
+    fn custom_paths_are_stored_under_profile_custom_root() {
+        let repo_root = PathBuf::from("/tmp/repo");
+        let home_root = PathBuf::from("/tmp/home");
+        let xdg_root = home_root.join(".config");
+        let active_path = PathBuf::from("/opt/tools/nvim/init.lua");
+        let managed = managed_path_for_roots(
+            &repo_root,
+            "desktop-arch",
+            OriginScope::Custom,
+            &active_path,
+            &home_root,
+            &xdg_root,
+        )
+        .unwrap();
+        assert_eq!(
+            managed,
+            PathBuf::from(
+                "/tmp/repo/profiles/desktop-arch/custom/absolute/opt/tools/nvim/init.lua"
+            )
+        );
     }
 }

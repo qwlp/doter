@@ -34,6 +34,7 @@ struct Widgets {
     kind_filter_combo: ComboBoxText,
     sort_combo: ComboBoxText,
     new_profile_button: Button,
+    track_path_button: Button,
     copy_profile_button: Button,
     remove_profile_button: Button,
     open_repo_root_button: Button,
@@ -123,6 +124,7 @@ enum ScopeFilter {
     All,
     Home,
     Config,
+    Custom,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -247,6 +249,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let profile_combo = ComboBoxText::new();
     let refresh_button = icon_button("view-refresh-symbolic", "Refresh");
     let new_profile_button = icon_button("list-add-symbolic", "New");
+    let track_path_button = icon_button("document-open-symbolic", "Track Path");
     let copy_profile_button = icon_button("edit-copy-symbolic", "Copy");
     let remove_profile_button = icon_button("user-trash-symbolic", "Remove");
     let open_repo_root_button = icon_button("folder-open-symbolic", "Open Repo");
@@ -258,10 +261,11 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     filter_grid.attach(&profile_combo, 0, 1, 2, 1);
     filter_grid.attach(&refresh_button, 2, 1, 1, 1);
     filter_grid.attach(&new_profile_button, 3, 1, 1, 1);
-    filter_grid.attach(&copy_profile_button, 0, 2, 1, 1);
-    filter_grid.attach(&remove_profile_button, 1, 2, 1, 1);
-    filter_grid.attach(&open_repo_root_button, 2, 2, 1, 1);
-    filter_grid.attach(&settings_button, 3, 2, 1, 1);
+    filter_grid.attach(&track_path_button, 0, 2, 1, 1);
+    filter_grid.attach(&copy_profile_button, 1, 2, 1, 1);
+    filter_grid.attach(&remove_profile_button, 2, 2, 1, 1);
+    filter_grid.attach(&open_repo_root_button, 3, 2, 1, 1);
+    filter_grid.attach(&settings_button, 0, 3, 4, 1);
 
     let filter_controls = Grid::new();
     filter_controls.set_row_spacing(8);
@@ -272,6 +276,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     scope_filter_combo.append(Some("all"), "All");
     scope_filter_combo.append(Some("home"), "Home");
     scope_filter_combo.append(Some("config"), "Config");
+    scope_filter_combo.append(Some("custom"), "Custom");
     scope_filter_combo.set_active_id(Some("all"));
     let kind_label = Label::new(Some("Type:"));
     kind_label.add_css_class("dim-label");
@@ -653,6 +658,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         kind_filter_combo,
         sort_combo,
         new_profile_button,
+        track_path_button,
         copy_profile_button,
         remove_profile_button,
         open_repo_root_button,
@@ -853,6 +859,7 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             guard.scope_filter = match combo.active_id().as_deref() {
                 Some("home") => ScopeFilter::Home,
                 Some("config") => ScopeFilter::Config,
+                Some("custom") => ScopeFilter::Custom,
                 _ => ScopeFilter::All,
             };
             drop(guard);
@@ -901,6 +908,14 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             prompt_new_profile(runtime);
         },
         |widgets| widgets.new_profile_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
+            prompt_track_custom_path(runtime);
+        },
+        |widgets| widgets.track_path_button.clone(),
     );
 
     bind_button(
@@ -1120,6 +1135,16 @@ fn default_repo_path() -> PathBuf {
         .join(".dotfiles")
 }
 
+fn dialog_content_box(dialog: &Dialog) -> GtkBox {
+    let box_ = GtkBox::new(Orientation::Vertical, 12);
+    box_.set_margin_top(18);
+    box_.set_margin_bottom(18);
+    box_.set_margin_start(18);
+    box_.set_margin_end(18);
+    dialog.content_area().append(&box_);
+    box_
+}
+
 fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
     let default_repo = default_repo_path();
     let widgets = runtime.borrow().widgets.clone();
@@ -1153,8 +1178,7 @@ fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
     dialog.add_button("Use Folder", ResponseType::Accept);
     dialog.add_button("Import Repo", ResponseType::Other(2));
 
-    let content = dialog.content_area();
-    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    let box_ = dialog_content_box(&dialog);
     let description = Label::new(Some(
         if onboarding {
             "Choose where your dotfiles repo should live locally. You can point Doter at an existing local repository or import one from a Git or GitHub URL. You can change this later from Settings."
@@ -1184,7 +1208,6 @@ fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
     box_.append(&remote_name_entry);
     box_.append(&Label::new(Some("Remote URL")));
     box_.append(&remote_url_entry);
-    content.append(&box_);
 
     {
         let runtime = runtime.clone();
@@ -1428,12 +1451,19 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
             .iter()
             .filter(|entry| matches!(entry.origin, crate::model::OriginScope::XdgConfig))
             .count();
+        let custom_count = guard
+            .report
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.origin, crate::model::OriginScope::Custom))
+            .count();
         let summary_text = format!(
-            "{} shown | {} total | {} home | {} config | {} conflicts | profile {} | repo {}",
+            "{} shown | {} total | {} home | {} config | {} custom | {} conflicts | profile {} | repo {}",
             entries.len(),
             guard.report.entries.len(),
             home_count,
             config_count,
+            custom_count,
             guard.report.conflicts.len(),
             guard.persisted.config.active_profile,
             guard
@@ -1481,7 +1511,7 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
         row_box.set_margin_end(10);
 
         let row_top = GtkBox::new(Orientation::Horizontal, 8);
-        let entry_icon = build_browser_row_icon(entry.kind);
+        let entry_icon = build_browser_row_icon(&entry);
         let title = Label::new(Some(&entry.display_name));
         title.set_xalign(0.0);
         title.set_hexpand(true);
@@ -1504,6 +1534,10 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
         list_box.append(&row);
 
         let card = FlowBoxChild::new();
+        card.set_halign(Align::Start);
+        card.set_valign(Align::Start);
+        card.set_hexpand(false);
+        card.set_vexpand(false);
         if selected_entry_id.as_deref() == Some(entry.id.as_str()) {
             card_to_select = Some(card.clone());
         }
@@ -1516,9 +1550,11 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
         card_box.set_size_request(100, 104);
         card_box.set_halign(Align::Center);
         card_box.set_valign(Align::Start);
+        card_box.set_hexpand(false);
+        card_box.set_vexpand(false);
         card_box.add_css_class("grid-card");
 
-        let icon = build_grid_icon(entry.kind);
+        let icon = build_grid_icon(&entry);
 
         let card_title = Label::new(Some(&entry.display_name));
         card_title.set_xalign(0.5);
@@ -1574,6 +1610,9 @@ fn browser_entries(
                 ScopeFilter::Config => {
                     matches!(entry.origin, crate::model::OriginScope::XdgConfig)
                 }
+                ScopeFilter::Custom => {
+                    matches!(entry.origin, crate::model::OriginScope::Custom)
+                }
             };
             let matches_kind = match kind_filter {
                 KindFilter::All => true,
@@ -1612,6 +1651,7 @@ fn scope_sort_key(origin: crate::model::OriginScope) -> u8 {
     match origin {
         crate::model::OriginScope::XdgConfig => 0,
         crate::model::OriginScope::Home => 1,
+        crate::model::OriginScope::Custom => 2,
     }
 }
 
@@ -1628,12 +1668,14 @@ fn scope_badge(origin: crate::model::OriginScope) -> Label {
     let text = match origin {
         crate::model::OriginScope::Home => "HOME",
         crate::model::OriginScope::XdgConfig => "CONFIG",
+        crate::model::OriginScope::Custom => "CUSTOM",
     };
     let label = Label::new(Some(text));
     label.add_css_class("scope-badge");
     match origin {
         crate::model::OriginScope::Home => label.add_css_class("scope-home"),
         crate::model::OriginScope::XdgConfig => label.add_css_class("scope-config"),
+        crate::model::OriginScope::Custom => label.add_css_class("scope-custom"),
     }
     label
 }
@@ -1659,6 +1701,7 @@ fn entry_browser_subtitle(entry: &DotfileEntry) -> String {
     match entry.origin {
         crate::model::OriginScope::Home => format!("~/{}", entry.display_name),
         crate::model::OriginScope::XdgConfig => format!(".config/{}", entry.display_name),
+        crate::model::OriginScope::Custom => entry.path.display().to_string(),
     }
 }
 
@@ -2835,8 +2878,8 @@ fn repo_file_label(root: &Path, file: &Path) -> String {
         .unwrap_or_else(|_| file.display().to_string())
 }
 
-fn build_grid_icon(kind: EntryKind) -> Image {
-    let icon_name = match kind {
+fn build_grid_icon(entry: &DotfileEntry) -> Image {
+    let icon_name = match effective_entry_kind(entry) {
         EntryKind::Directory => "folder",
         EntryKind::Symlink => "emblem-symbolic-link",
         EntryKind::File | EntryKind::Unknown => "text-x-generic",
@@ -2845,11 +2888,14 @@ fn build_grid_icon(kind: EntryKind) -> Image {
     icon.set_pixel_size(48);
     icon.set_halign(Align::Center);
     icon.set_valign(Align::Center);
+    if entry.managed_state == ManagedState::ManagedActive {
+        icon.add_css_class("active-entry-icon");
+    }
     icon
 }
 
-fn build_browser_row_icon(kind: EntryKind) -> Image {
-    let icon_name = match kind {
+fn build_browser_row_icon(entry: &DotfileEntry) -> Image {
+    let icon_name = match effective_entry_kind(entry) {
         EntryKind::Directory => "folder-symbolic",
         EntryKind::Symlink => "emblem-symbolic-link",
         EntryKind::File | EntryKind::Unknown => "text-x-generic-symbolic",
@@ -2857,7 +2903,30 @@ fn build_browser_row_icon(kind: EntryKind) -> Image {
     let icon = Image::from_icon_name(icon_name);
     icon.set_pixel_size(14);
     icon.add_css_class("row-icon");
+    if entry.managed_state == ManagedState::ManagedActive {
+        icon.add_css_class("active-entry-icon");
+    }
     icon
+}
+
+fn effective_entry_kind(entry: &DotfileEntry) -> EntryKind {
+    if entry.managed_state == ManagedState::ManagedActive {
+        if let Some(target) = entry.managed_source.as_ref().or(entry.symlink_target.as_ref()) {
+            if let Ok(metadata) = fs::symlink_metadata(target) {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    return EntryKind::Symlink;
+                }
+                if metadata.is_dir() {
+                    return EntryKind::Directory;
+                }
+                if metadata.is_file() {
+                    return EntryKind::File;
+                }
+            }
+        }
+    }
+    entry.kind
 }
 
 fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
@@ -3562,6 +3631,99 @@ fn prompt_new_profile(runtime: Rc<RefCell<AppRuntime>>) {
     dialog.present();
 }
 
+fn prompt_track_custom_path(runtime: Rc<RefCell<AppRuntime>>) {
+    let widgets = runtime.borrow().widgets.clone();
+    let dialog = Dialog::builder()
+        .title("Track custom path")
+        .transient_for(&widgets.window)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", ResponseType::Cancel);
+    dialog.add_button("Choose File", ResponseType::Other(1));
+    dialog.add_button("Choose Folder", ResponseType::Other(2));
+
+    let box_ = dialog_content_box(&dialog);
+    let description = Label::new(Some(
+        "Track a file or folder from any location on disk. Doter will include it in the browser and manage its profile copy inside the repository.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    box_.append(&description);
+
+    {
+        let runtime = runtime.clone();
+        dialog.connect_response(move |dialog, response| {
+            match response {
+                ResponseType::Other(1) => {
+                    choose_custom_path(runtime.clone(), FileChooserAction::Open);
+                }
+                ResponseType::Other(2) => {
+                    choose_custom_path(runtime.clone(), FileChooserAction::SelectFolder);
+                }
+                _ => {}
+            }
+            dialog.close();
+        });
+    }
+
+    dialog.present();
+}
+
+fn choose_custom_path(runtime: Rc<RefCell<AppRuntime>>, action: FileChooserAction) {
+    let title = match action {
+        FileChooserAction::Open => "Choose file to track",
+        FileChooserAction::SelectFolder => "Choose folder to track",
+        _ => "Choose path to track",
+    };
+    let chooser = FileChooserNative::builder()
+        .title(title)
+        .transient_for(&runtime.borrow().widgets.window)
+        .action(action)
+        .accept_label("Track")
+        .cancel_label("Cancel")
+        .build();
+    chooser.connect_response(move |chooser, response| {
+        if response == ResponseType::Accept {
+            if let Some(file) = chooser.file() {
+                if let Some(path) = file.path() {
+                    if let Err(error) = add_custom_path(&runtime, &path) {
+                        show_message(
+                            &runtime.borrow().widgets.window,
+                            "Track path failed",
+                            &error.to_string(),
+                        );
+                    } else {
+                        refresh(runtime.clone());
+                    }
+                }
+            }
+        }
+        chooser.destroy();
+    });
+    chooser.show();
+}
+
+fn add_custom_path(runtime: &Rc<RefCell<AppRuntime>>, path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("{} does not exist", path.display()));
+    }
+    let mut guard = runtime.borrow_mut();
+    if guard
+        .persisted
+        .config
+        .custom_paths
+        .iter()
+        .any(|existing| existing == path)
+    {
+        return Err(anyhow!("{} is already being tracked", path.display()));
+    }
+    guard.persisted.config.custom_paths.push(path.to_path_buf());
+    guard.persisted.config.custom_paths.sort();
+    let paths = guard.paths.clone();
+    guard.persisted.save(&paths)?;
+    Ok(())
+}
+
 fn prompt_copy_profile(runtime: Rc<RefCell<AppRuntime>>) {
     let widgets = runtime.borrow().widgets.clone();
     let profiles = runtime.borrow().persisted.config.profiles.clone();
@@ -4222,7 +4384,7 @@ fn show_message(window: &ApplicationWindow, title: &str, body: &str) {
         .build();
     dialog.add_button("OK", ResponseType::Ok);
 
-    let content = dialog.content_area();
+    let content = dialog_content_box(&dialog);
     let label = Label::new(Some(body));
     label.set_wrap(true);
     label.set_xalign(0.0);
@@ -4240,7 +4402,7 @@ fn confirm_action(window: &ApplicationWindow, title: &str, body: &str) -> bool {
         .build();
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Continue", ResponseType::Accept);
-    let content = dialog.content_area();
+    let content = dialog_content_box(&dialog);
     let label = Label::new(Some(body));
     label.set_wrap(true);
     label.set_xalign(0.0);

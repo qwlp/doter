@@ -1,6 +1,7 @@
 use crate::model::{DotfileEntry, EntryKind, ManagedState, OriginScope, ScanReport};
 use crate::state::PersistedState;
 use anyhow::Result;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ pub fn scan_dotfiles_for_roots(
     home: &Path,
     xdg_config: &Path,
 ) -> Result<ScanReport> {
+    let mut seen_paths = BTreeSet::new();
     let mut entries = Vec::new();
     let mut warnings = Vec::new();
     let mut conflicts = Vec::new();
@@ -37,6 +39,9 @@ pub fn scan_dotfiles_for_roots(
             if matches!(name, ".cache" | ".local" | ".cargo" | ".rustup") {
                 continue;
             }
+            if !seen_paths.insert(path.clone()) {
+                continue;
+            }
             match classify_entry(state, &path, OriginScope::Home) {
                 Ok(entry) => {
                     if entry.managed_state == ManagedState::Conflicted {
@@ -53,6 +58,9 @@ pub fn scan_dotfiles_for_roots(
         for item in fs::read_dir(xdg_config)? {
             let item = item?;
             let path = item.path();
+            if !seen_paths.insert(path.clone()) {
+                continue;
+            }
             match classify_entry(state, &path, OriginScope::XdgConfig) {
                 Ok(entry) => {
                     if entry.managed_state == ManagedState::Conflicted {
@@ -62,6 +70,25 @@ pub fn scan_dotfiles_for_roots(
                 }
                 Err(error) => warnings.push(format!("{}: {error}", path.display())),
             }
+        }
+    }
+
+    for path in &state.config.custom_paths {
+        if !path.exists() {
+            warnings.push(format!("{}: configured custom path does not exist", path.display()));
+            continue;
+        }
+        if !seen_paths.insert(path.clone()) {
+            continue;
+        }
+        match classify_entry(state, path, OriginScope::Custom) {
+            Ok(entry) => {
+                if entry.managed_state == ManagedState::Conflicted {
+                    conflicts.push(entry.path.display().to_string());
+                }
+                entries.push(entry);
+            }
+            Err(error) => warnings.push(format!("{}: {error}", path.display())),
         }
     }
 
@@ -165,6 +192,7 @@ pub fn stable_id(origin: OriginScope, path: &Path) -> String {
     let prefix = match origin {
         OriginScope::Home => "home",
         OriginScope::XdgConfig => "xdg",
+        OriginScope::Custom => "custom",
     };
     format!("{prefix}:{}", path.display())
 }
@@ -254,6 +282,31 @@ mod tests {
         let entry = classify_entry(&state, &xdg.join("nvim"), OriginScope::XdgConfig).unwrap();
         assert_eq!(entry.managed_state, ManagedState::ManagedActive);
         assert_eq!(entry.managed_source, Some(managed_source));
+    }
+
+    #[test]
+    fn scans_configured_custom_paths() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let custom_file = temp.path().join("work/random-tool/config.toml");
+        fs::create_dir_all(custom_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(&custom_file, "enabled = true").unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                custom_paths: vec![custom_file.clone()],
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let report = scan_dotfiles_for_roots(&state, &home, &xdg).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].origin, OriginScope::Custom);
+        assert_eq!(report.entries[0].path, custom_file);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub enum OriginScope {
     Home,
     XdgConfig,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +66,8 @@ pub struct AppConfig {
     pub remote_name: String,
     #[serde(default)]
     pub onboarding_complete: bool,
+    #[serde(default)]
+    pub custom_paths: Vec<PathBuf>,
     #[serde(default = "default_profiles")]
     pub profiles: Vec<String>,
     #[serde(default = "default_active_profile")]
@@ -80,6 +83,7 @@ impl Default for AppConfig {
             backup_enabled: true,
             remote_name: "origin".to_string(),
             onboarding_complete: false,
+            custom_paths: Vec::new(),
             profiles: default_profiles(),
             active_profile: default_active_profile(),
         }

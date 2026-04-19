@@ -250,13 +250,26 @@ paned > separator {
     color: alpha(#e7e5ef, 0.72);
 }
 
+image.active-entry-icon {
+    color: #8fd6a8;
+}
+
 .button-content {
     padding: 0 4px;
 }
 
 flowboxchild {
     background: transparent;
+    background-image: none;
     border-radius: 14px;
+    box-shadow: none;
+}
+
+flowboxchild:selected {
+    background: transparent;
+    background-image: none;
+    box-shadow: none;
+    outline: none;
 }
 
 flowboxchild > box.grid-card {
@@ -290,6 +303,11 @@ flowboxchild:selected > box.grid-card {
 .scope-config {
     background: alpha(#76d7a5, 0.18);
     color: #bcedd2;
+}
+
+.scope-custom {
+    background: alpha(#ffca6f, 0.18);
+    color: #ffe2aa;
 }
 
 .status-active {
