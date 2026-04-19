@@ -35,6 +35,7 @@ struct Widgets {
     sort_combo: ComboBoxText,
     new_profile_button: Button,
     track_path_button: Button,
+    apply_profile_button: Button,
     copy_profile_button: Button,
     remove_profile_button: Button,
     open_repo_root_button: Button,
@@ -250,6 +251,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     let refresh_button = icon_button("view-refresh-symbolic", "Refresh");
     let new_profile_button = icon_button("list-add-symbolic", "New");
     let track_path_button = icon_button("document-open-symbolic", "Track Path");
+    let apply_profile_button = icon_button("emblem-ok-symbolic", "Apply");
     let copy_profile_button = icon_button("edit-copy-symbolic", "Copy");
     let remove_profile_button = icon_button("user-trash-symbolic", "Remove");
     let open_repo_root_button = icon_button("folder-open-symbolic", "Open Repo");
@@ -262,10 +264,11 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
     filter_grid.attach(&refresh_button, 2, 1, 1, 1);
     filter_grid.attach(&new_profile_button, 3, 1, 1, 1);
     filter_grid.attach(&track_path_button, 0, 2, 1, 1);
-    filter_grid.attach(&copy_profile_button, 1, 2, 1, 1);
-    filter_grid.attach(&remove_profile_button, 2, 2, 1, 1);
-    filter_grid.attach(&open_repo_root_button, 3, 2, 1, 1);
-    filter_grid.attach(&settings_button, 0, 3, 4, 1);
+    filter_grid.attach(&apply_profile_button, 1, 2, 1, 1);
+    filter_grid.attach(&copy_profile_button, 2, 2, 1, 1);
+    filter_grid.attach(&remove_profile_button, 3, 2, 1, 1);
+    filter_grid.attach(&open_repo_root_button, 0, 3, 2, 1);
+    filter_grid.attach(&settings_button, 2, 3, 2, 1);
 
     let filter_controls = Grid::new();
     filter_controls.set_row_spacing(8);
@@ -659,6 +662,7 @@ fn build_widgets(window: &ApplicationWindow) -> Widgets {
         sort_combo,
         new_profile_button,
         track_path_button,
+        apply_profile_button,
         copy_profile_button,
         remove_profile_button,
         open_repo_root_button,
@@ -916,6 +920,14 @@ fn install_handlers(runtime: Rc<RefCell<AppRuntime>>) {
             prompt_track_custom_path(runtime);
         },
         |widgets| widgets.track_path_button.clone(),
+    );
+
+    bind_button(
+        runtime.clone(),
+        |runtime| {
+            prompt_apply_active_profile(runtime, false);
+        },
+        |widgets| widgets.apply_profile_button.clone(),
     );
 
     bind_button(
@@ -1234,6 +1246,7 @@ fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
                         }
                         dialog.close();
                         refresh(runtime.clone());
+                        maybe_prompt_apply_profile(&runtime);
                     }
                     Err(error) => {
                         show_message(
@@ -1284,6 +1297,7 @@ fn prompt_settings(runtime: Rc<RefCell<AppRuntime>>, onboarding: bool) {
                         }
                         dialog.close();
                         refresh(runtime.clone());
+                        maybe_prompt_apply_profile(&runtime);
                     }
                     Err(error) => {
                         show_message(
@@ -1430,7 +1444,7 @@ fn refresh(runtime: Rc<RefCell<AppRuntime>>) {
 }
 
 fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
-    let (list_box, grid_box, summary_label, entries, summary_text, selected_entry_id) = {
+    let (list_box, grid_box, summary_label, apply_profile_button, entries, summary_text, selected_entry_id, apply_preview) = {
         let guard = runtime.borrow();
         let entries = browser_entries(
             &guard.report,
@@ -1478,9 +1492,11 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
             guard.widgets.list_box.clone(),
             guard.widgets.grid_box.clone(),
             guard.widgets.summary_label.clone(),
+            guard.widgets.apply_profile_button.clone(),
             entries,
             summary_text,
             guard.selected_entry_id.clone(),
+            operations::preview_apply_entries(&guard.report.entries),
         )
     };
 
@@ -1492,6 +1508,7 @@ fn render_list(runtime: &Rc<RefCell<AppRuntime>>) {
     }
 
     summary_label.set_label(&summary_text);
+    apply_profile_button.set_sensitive(apply_preview.inactive_entries > 0);
 
     runtime.borrow_mut().browser_selection_updating = true;
     let mut row_to_select: Option<ListBoxRow> = None;
@@ -3057,6 +3074,105 @@ fn update_details(runtime: &Rc<RefCell<AppRuntime>>) {
     }
 }
 
+fn apply_profile_candidates(
+    runtime: &Rc<RefCell<AppRuntime>>,
+) -> (String, Vec<DotfileEntry>, operations::ProfileApplyPreview, usize) {
+    let guard = runtime.borrow();
+    let profile = guard.persisted.config.active_profile.clone();
+    let entries = guard
+        .report
+        .entries
+        .iter()
+        .filter(|entry| entry.managed_state == ManagedState::ManagedInactive)
+        .cloned()
+        .collect::<Vec<_>>();
+    let preview = operations::preview_apply_entries(&entries);
+    let active_entries = guard
+        .report
+        .entries
+        .iter()
+        .filter(|entry| entry.managed_state == ManagedState::ManagedActive)
+        .count();
+    (profile, entries, preview, active_entries)
+}
+
+fn prompt_apply_active_profile(runtime: Rc<RefCell<AppRuntime>>, automatic: bool) {
+    let (profile, entries, preview, active_entries) = apply_profile_candidates(&runtime);
+    if preview.inactive_entries == 0 {
+        if !automatic {
+            show_message(
+                &runtime.borrow().widgets.window,
+                "Profile already applied",
+                &format!(
+                    "Profile '{}' has no inactive managed entries to activate on this device.",
+                    profile
+                ),
+            );
+        }
+        return;
+    }
+
+    let title = if automatic {
+        "Apply profile on this device"
+    } else {
+        "Apply active profile"
+    };
+    let body = if automatic {
+        format!(
+            "Profile '{}' was found in the repo, but nothing from it is active on this device yet.\n\nApply all {} managed entr{} now? Doter will back up {} existing local path(s) before replacing them, and create {} missing path(s).",
+            profile,
+            preview.inactive_entries,
+            if preview.inactive_entries == 1 { "y" } else { "ies" },
+            preview.existing_paths_to_replace,
+            preview.missing_paths_to_create,
+        )
+    } else {
+        format!(
+            "Apply profile '{}' on this device?\n\nThis will activate {} inactive managed entr{}.\n{} existing local path(s) will be backed up and replaced.\n{} missing path(s) will be created.\n{} entr{} already active will be left alone.",
+            profile,
+            preview.inactive_entries,
+            if preview.inactive_entries == 1 { "y" } else { "ies" },
+            preview.existing_paths_to_replace,
+            preview.missing_paths_to_create,
+            active_entries,
+            if active_entries == 1 { "y" } else { "ies" },
+        )
+    };
+    if !confirm_action(&runtime.borrow().widgets.window, title, &body) {
+        return;
+    }
+
+    let result = {
+        let mut guard = runtime.borrow_mut();
+        let paths = guard.paths.clone();
+        let result = operations::apply_entries(&mut guard.persisted, &paths, &entries);
+        if result.is_ok() {
+            let _ = guard.persisted.save(&paths);
+        }
+        result
+    };
+
+    match result {
+        Ok(result) => {
+            let widgets = runtime.borrow().widgets.clone();
+            present_sync_notice(&widgets, "Profile applied", &result.message, false);
+            refresh(runtime);
+        }
+        Err(error) => show_message(
+            &runtime.borrow().widgets.window,
+            "Apply profile failed",
+            &error.to_string(),
+        ),
+    }
+}
+
+fn maybe_prompt_apply_profile(runtime: &Rc<RefCell<AppRuntime>>) {
+    let (_, _, preview, active_entries) = apply_profile_candidates(runtime);
+    if preview.inactive_entries > 0 && active_entries == 0 {
+        prompt_apply_active_profile(runtime.clone(), true);
+    }
+}
+
 fn selected_entry(runtime: &Rc<RefCell<AppRuntime>>) -> Option<DotfileEntry> {
     let guard = runtime.borrow();
     let selected_id = guard.selected_entry_id.as_ref()?;
@@ -3497,6 +3613,7 @@ fn sync_with_remote(runtime: Rc<RefCell<AppRuntime>>) {
                 );
                 present_sync_notice(&widgets, "Sync complete", &body, false);
                 refresh(runtime.clone());
+                maybe_prompt_apply_profile(&runtime);
                 ControlFlow::Break
             }
             Ok(Err(error)) => {

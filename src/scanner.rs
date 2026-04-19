@@ -42,7 +42,7 @@ pub fn scan_dotfiles_for_roots(
             if !seen_paths.insert(path.clone()) {
                 continue;
             }
-            match classify_entry(state, &path, OriginScope::Home) {
+            match classify_entry_for_roots(state, &path, OriginScope::Home, home, xdg_config) {
                 Ok(entry) => {
                     if entry.managed_state == ManagedState::Conflicted {
                         conflicts.push(entry.path.display().to_string());
@@ -61,7 +61,7 @@ pub fn scan_dotfiles_for_roots(
             if !seen_paths.insert(path.clone()) {
                 continue;
             }
-            match classify_entry(state, &path, OriginScope::XdgConfig) {
+            match classify_entry_for_roots(state, &path, OriginScope::XdgConfig, home, xdg_config) {
                 Ok(entry) => {
                     if entry.managed_state == ManagedState::Conflicted {
                         conflicts.push(entry.path.display().to_string());
@@ -81,7 +81,7 @@ pub fn scan_dotfiles_for_roots(
         if !seen_paths.insert(path.clone()) {
             continue;
         }
-        match classify_entry(state, path, OriginScope::Custom) {
+        match classify_entry_for_roots(state, path, OriginScope::Custom, home, xdg_config) {
             Ok(entry) => {
                 if entry.managed_state == ManagedState::Conflicted {
                     conflicts.push(entry.path.display().to_string());
@@ -89,6 +89,32 @@ pub fn scan_dotfiles_for_roots(
                 entries.push(entry);
             }
             Err(error) => warnings.push(format!("{}: {error}", path.display())),
+        }
+    }
+
+    let active_profile = state.active_profile().to_string();
+    if let Some(repo_root) = state.config.repo_root.as_ref() {
+        if state.config.include_hidden_home {
+            collect_repo_profile_entries(
+                &mut entries,
+                &mut seen_paths,
+                state,
+                &repo_root.join("profiles").join(&active_profile).join("home"),
+                OriginScope::Home,
+                home,
+                xdg_config,
+            )?;
+        }
+        if state.config.include_xdg_config {
+            collect_repo_profile_entries(
+                &mut entries,
+                &mut seen_paths,
+                state,
+                &repo_root.join("profiles").join(&active_profile).join("config"),
+                OriginScope::XdgConfig,
+                home,
+                xdg_config,
+            )?;
         }
     }
 
@@ -107,6 +133,21 @@ pub fn classify_entry(
     path: &Path,
     origin: OriginScope,
 ) -> Result<DotfileEntry> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to resolve home directory"))?;
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    classify_entry_for_roots(state, path, origin, &home, &xdg)
+}
+
+fn classify_entry_for_roots(
+    state: &PersistedState,
+    path: &Path,
+    origin: OriginScope,
+    home: &Path,
+    xdg_config: &Path,
+) -> Result<DotfileEntry> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     let kind = if file_type.is_symlink() {
@@ -122,6 +163,11 @@ pub fn classify_entry(
     let id = stable_id(origin, path);
     let active_profile = state.active_profile();
     let record = state.find_record(active_profile, path);
+    let expected_managed_source = state
+        .config
+        .repo_root
+        .as_ref()
+        .map(|repo_root| expected_managed_source(repo_root, active_profile, origin, path, home, xdg_config));
     let symlink_target = if file_type.is_symlink() {
         fs::read_link(path).ok()
     } else {
@@ -138,9 +184,21 @@ pub fn classify_entry(
     } else if let (Some(target), Some(repo_root)) = (&symlink_target, repo_root) {
         if target.starts_with(repo_root.join("profiles").join(active_profile)) {
             ManagedState::ManagedActive
+        } else if expected_managed_source
+            .as_ref()
+            .map(|source| source.exists())
+            .unwrap_or(false)
+        {
+            ManagedState::ManagedInactive
         } else {
             ManagedState::Unmanaged
         }
+    } else if expected_managed_source
+        .as_ref()
+        .map(|source| source.exists())
+        .unwrap_or(false)
+    {
+        ManagedState::ManagedInactive
     } else {
         ManagedState::Unmanaged
     };
@@ -165,6 +223,8 @@ pub fn classify_entry(
         .or_else(|| {
             if managed_state == ManagedState::ManagedActive {
                 symlink_target.clone()
+            } else if managed_state == ManagedState::ManagedInactive {
+                expected_managed_source.clone()
             } else {
                 None
             }
@@ -186,6 +246,125 @@ pub fn classify_entry(
         backup_path: record.and_then(|record| record.backup_path.clone()),
         warning,
     })
+}
+
+fn expected_managed_source(
+    repo_root: &Path,
+    profile: &str,
+    origin: OriginScope,
+    active_path: &Path,
+    home: &Path,
+    xdg_config: &Path,
+) -> PathBuf {
+    match origin {
+        OriginScope::Home => repo_root
+            .join("profiles")
+            .join(profile)
+            .join("home")
+            .join(active_path.strip_prefix(home).unwrap_or(active_path)),
+        OriginScope::XdgConfig => repo_root
+            .join("profiles")
+            .join(profile)
+            .join("config")
+            .join(active_path.strip_prefix(xdg_config).unwrap_or(active_path)),
+        OriginScope::Custom => repo_root
+            .join("profiles")
+            .join(profile)
+            .join("custom")
+            .join(custom_relative_path(active_path)),
+    }
+}
+
+fn custom_relative_path(active_path: &Path) -> PathBuf {
+    let mut relative = PathBuf::new();
+    if active_path.is_absolute() {
+        relative.push("absolute");
+    } else {
+        relative.push("relative");
+    }
+
+    for component in active_path.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(prefix) => relative.push(prefix.as_os_str()),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => relative.push("parent"),
+            Component::Normal(part) => relative.push(part),
+        }
+    }
+
+    relative
+}
+
+fn collect_repo_profile_entries(
+    entries: &mut Vec<DotfileEntry>,
+    seen_paths: &mut BTreeSet<PathBuf>,
+    state: &PersistedState,
+    managed_root: &Path,
+    origin: OriginScope,
+    home: &Path,
+    xdg_config: &Path,
+) -> Result<()> {
+    if !managed_root.exists() {
+        return Ok(());
+    }
+
+    for item in fs::read_dir(managed_root)? {
+        let item = item?;
+        let managed_source = item.path();
+        let live_path = match origin {
+            OriginScope::Home => home.join(item.file_name()),
+            OriginScope::XdgConfig => xdg_config.join(item.file_name()),
+            OriginScope::Custom => continue,
+        };
+        if !seen_paths.insert(live_path.clone()) {
+            continue;
+        }
+        entries.push(repo_only_entry(state, live_path, managed_source, origin));
+    }
+    Ok(())
+}
+
+fn repo_only_entry(
+    state: &PersistedState,
+    live_path: PathBuf,
+    managed_source: PathBuf,
+    origin: OriginScope,
+) -> DotfileEntry {
+    let kind = fs::symlink_metadata(&managed_source)
+        .map(|metadata| {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                EntryKind::Symlink
+            } else if metadata.is_file() {
+                EntryKind::File
+            } else if metadata.is_dir() {
+                EntryKind::Directory
+            } else {
+                EntryKind::Unknown
+            }
+        })
+        .unwrap_or(EntryKind::Unknown);
+    let backup_path = state
+        .find_record(state.active_profile(), &live_path)
+        .and_then(|record| record.backup_path.clone());
+
+    DotfileEntry {
+        id: stable_id(origin, &live_path),
+        display_name: live_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+        path: live_path,
+        origin,
+        kind,
+        managed_state: ManagedState::ManagedInactive,
+        managed_source: Some(managed_source),
+        symlink_target: None,
+        backup_path,
+        warning: None,
+    }
 }
 
 pub fn stable_id(origin: OriginScope, path: &Path) -> String {
@@ -307,6 +486,59 @@ mod tests {
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].origin, OriginScope::Custom);
         assert_eq!(report.entries[0].path, custom_file);
+    }
+
+    #[test]
+    fn marks_local_entry_in_repo_but_not_active_as_inactive() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(repo_root.join("profiles/desktop-arch/config")).unwrap();
+        fs::write(xdg.join("nvim"), "local config").unwrap();
+        fs::write(repo_root.join("profiles/desktop-arch/config/nvim"), "repo config").unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let entry = classify_entry_for_roots(&state, &xdg.join("nvim"), OriginScope::XdgConfig, &home, &xdg)
+            .unwrap();
+        assert_eq!(entry.managed_state, ManagedState::ManagedInactive);
+        assert!(entry.managed_source.is_some());
+    }
+
+    #[test]
+    fn includes_repo_entries_missing_from_live_path_as_inactive() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let xdg = home.join(".config");
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(repo_root.join("profiles/desktop-arch/config")).unwrap();
+        fs::write(repo_root.join("profiles/desktop-arch/config/nvim"), "repo config").unwrap();
+
+        let state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root),
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+
+        let report = scan_dotfiles_for_roots(&state, &home, &xdg).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].display_name, "nvim");
+        assert_eq!(report.entries[0].managed_state, ManagedState::ManagedInactive);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Maintainer: Sokpiseth Thin <sokpiseth.thin@gmail.com>
 
 pkgname=doter-bin
-pkgver=0.1.4
+pkgver=0.1.5
 pkgrel=1
 pkgdesc="A simple GTK4 GUI for managing dotfiles with Git"
 arch=('x86_64')

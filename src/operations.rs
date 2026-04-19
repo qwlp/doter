@@ -19,6 +19,13 @@ pub struct ProfileCopyPreview {
     pub conflict_paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProfileApplyPreview {
+    pub inactive_entries: usize,
+    pub existing_paths_to_replace: usize,
+    pub missing_paths_to_create: usize,
+}
+
 pub fn enable_entry(
     state: &mut PersistedState,
     paths: &AppPaths,
@@ -444,6 +451,61 @@ pub fn copy_profile(
             copied_paths
         ),
     };
+
+    Ok(result)
+}
+
+pub fn preview_apply_entries(entries: &[DotfileEntry]) -> ProfileApplyPreview {
+    let mut preview = ProfileApplyPreview::default();
+    for entry in entries {
+        if entry.managed_state != ManagedState::ManagedInactive || entry.managed_source.is_none() {
+            continue;
+        }
+        preview.inactive_entries += 1;
+        if entry.path.exists() {
+            preview.existing_paths_to_replace += 1;
+        } else {
+            preview.missing_paths_to_create += 1;
+        }
+    }
+    preview
+}
+
+pub fn apply_entries(
+    state: &mut PersistedState,
+    paths: &AppPaths,
+    entries: &[DotfileEntry],
+) -> Result<OperationResult> {
+    let preview = preview_apply_entries(entries);
+    if preview.inactive_entries == 0 {
+        return Err(anyhow!("No inactive managed entries are available to apply"));
+    }
+
+    let active_profile = state.active_profile().to_string();
+    let mut result = OperationResult {
+        success: true,
+        message: String::new(),
+        filesystem_changes: Vec::new(),
+        git_changes: Vec::new(),
+    };
+
+    for entry in entries {
+        if entry.managed_state != ManagedState::ManagedInactive || entry.managed_source.is_none() {
+            continue;
+        }
+        let step = enable_entry(state, paths, entry)?;
+        result.filesystem_changes.extend(step.filesystem_changes);
+        result.git_changes.extend(step.git_changes);
+    }
+
+    result.message = format!(
+        "Applied profile {} on this device; activated {} entr{}, backed up {} existing path(s), created {} missing path(s)",
+        active_profile,
+        preview.inactive_entries,
+        if preview.inactive_entries == 1 { "y" } else { "ies" },
+        preview.existing_paths_to_replace,
+        preview.missing_paths_to_create
+    );
 
     Ok(result)
 }
@@ -1238,5 +1300,106 @@ mod tests {
                 "/tmp/repo/profiles/desktop-arch/custom/absolute/opt/tools/nvim/init.lua"
             )
         );
+    }
+
+    #[test]
+    fn previews_inactive_profile_apply_counts() {
+        let temp = tempdir().unwrap();
+        let existing_path = temp.path().join("existing");
+        std::fs::write(&existing_path, "local").unwrap();
+        let missing_path = temp.path().join("missing");
+        let entries = vec![
+            DotfileEntry {
+                id: "one".to_string(),
+                display_name: "existing".to_string(),
+                path: existing_path,
+                origin: OriginScope::Home,
+                kind: crate::model::EntryKind::File,
+                managed_state: ManagedState::ManagedInactive,
+                managed_source: Some(temp.path().join("repo/profiles/default/home/.one")),
+                symlink_target: None,
+                backup_path: None,
+                warning: None,
+            },
+            DotfileEntry {
+                id: "two".to_string(),
+                display_name: "missing".to_string(),
+                path: missing_path,
+                origin: OriginScope::XdgConfig,
+                kind: crate::model::EntryKind::Directory,
+                managed_state: ManagedState::ManagedInactive,
+                managed_source: Some(temp.path().join("repo/profiles/default/config/two")),
+                symlink_target: None,
+                backup_path: None,
+                warning: None,
+            },
+        ];
+
+        let preview = preview_apply_entries(&entries);
+        assert_eq!(preview.inactive_entries, 2);
+        assert_eq!(preview.existing_paths_to_replace, 1);
+        assert_eq!(preview.missing_paths_to_create, 1);
+    }
+
+    #[test]
+    fn applies_inactive_profile_entries() {
+        let temp = tempdir().unwrap();
+        let repo_root = temp.path().join("repo");
+        let config_root = temp.path().join("config");
+        let active_path = config_root.join("nvim");
+        let managed_source = repo_root.join("profiles/desktop-arch/config/nvim");
+        std::fs::create_dir_all(managed_source.parent().unwrap()).unwrap();
+        std::fs::write(&managed_source, "repo config").unwrap();
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::write(&active_path, "local config").unwrap();
+
+        let mut state = PersistedState {
+            config: AppConfig {
+                repo_root: Some(repo_root.clone()),
+                onboarding_complete: true,
+                profiles: vec!["desktop-arch".to_string()],
+                active_profile: "desktop-arch".to_string(),
+                ..AppConfig::default()
+            },
+            managed_entries: Vec::new(),
+        };
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            backup_dir: temp.path().join("backups"),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::create_dir_all(&paths.backup_dir).unwrap();
+        let entry = DotfileEntry {
+            id: stable_id(OriginScope::XdgConfig, &active_path),
+            display_name: "nvim".to_string(),
+            path: active_path.clone(),
+            origin: OriginScope::XdgConfig,
+            kind: crate::model::EntryKind::File,
+            managed_state: ManagedState::ManagedInactive,
+            managed_source: Some(managed_source.clone()),
+            symlink_target: None,
+            backup_path: None,
+            warning: None,
+        };
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_root);
+        }
+        let result = apply_entries(&mut state, &paths, &[entry]).unwrap();
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+
+        assert!(result.message.contains("Applied profile desktop-arch"));
+        assert_eq!(state.managed_entries.len(), 1);
+        assert!(std::fs::symlink_metadata(&active_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&active_path).unwrap(), managed_source);
+        let backup_path = state.managed_entries[0].backup_path.clone().unwrap();
+        assert_eq!(std::fs::read_to_string(&backup_path).unwrap(), "local config");
     }
 }
